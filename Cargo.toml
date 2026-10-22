@@ -28,6 +28,8 @@ liburing-macros = { git = "https://github.com/trunkszi/liburing-rs.git" }
 unsafe_op_in_unsafe_fn = "deny"
 
 [workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
 clone_on_copy = "deny"
 redundant_clone = "deny"
 implicit_clone = "deny"

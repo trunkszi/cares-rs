@@ -10,6 +10,8 @@ use std::{
     process::Command,
 };
 
+type BuildResult<T> = Result<T, Box<dyn std::error::Error>>;
+
 const REPOSITORY: &str = "https://github.com/c-ares/c-ares.git";
 const STABLE_TAG: &str = "v1.34.9";
 const DEFAULT_BRANCH: &str = "main";
@@ -42,9 +44,9 @@ fn target_root(manifest: &Path, out_dir: &Path) -> PathBuf {
                 .and_then(Path::parent)
                 .and_then(Path::parent)
                 .map(|path| {
-                    let triple = env::var_os("TARGET").expect("TARGET");
-                    if path.file_name() == Some(triple.as_os_str()) {
-                        path.parent().expect("target triple parent")
+                    let triple = env::var_os("TARGET");
+                    if path.file_name() == triple.as_deref() {
+                        path.parent().unwrap_or(path)
                     } else {
                         path
                     }
@@ -54,7 +56,7 @@ fn target_root(manifest: &Path, out_dir: &Path) -> PathBuf {
         .unwrap_or_else(|| manifest.join("../../target"))
 }
 
-fn verify_cached_ref(source: &Path, git_ref: &str, stable: bool) {
+fn verify_cached_ref(source: &Path, git_ref: &str, stable: bool) -> BuildResult<()> {
     assert!(
         source.join(".git").exists(),
         "cached c-ares source has no Git metadata at {}; use CARES_DIR for a source archive",
@@ -69,34 +71,33 @@ fn verify_cached_ref(source: &Path, git_ref: &str, stable: bool) {
         .arg("-C")
         .arg(source)
         .args(arguments)
-        .output()
-        .expect("verify cached c-ares source ref");
+        .output()?;
     assert!(output.status.success(), "cannot verify cached c-ares ref");
-    let actual = String::from_utf8(output.stdout).expect("UTF-8 c-ares ref");
+    let actual = String::from_utf8(output.stdout)?;
     assert_eq!(
         actual.trim(),
         git_ref,
         "unexpected c-ares ref at {}",
         source.display()
     );
+    Ok(())
 }
 
-fn clone_into_target(target: &Path, git_ref: &str, stable: bool) -> PathBuf {
+fn clone_into_target(target: &Path, git_ref: &str, stable: bool) -> BuildResult<PathBuf> {
     let cache = target.join(format!("c-ares-{git_ref}"));
     if is_source_tree(&cache) {
-        verify_cached_ref(&cache, git_ref, stable);
-        return cache;
+        verify_cached_ref(&cache, git_ref, stable)?;
+        return Ok(cache);
     }
     let staging = target.join(format!("c-ares-{git_ref}.fetch-{}", std::process::id()));
     // An interrupted fetch from this process may leave a staging directory.
     if staging.exists() {
-        fs::remove_dir_all(&staging).expect("remove interrupted c-ares fetch");
+        fs::remove_dir_all(&staging)?;
     }
     let status = Command::new("git")
         .args(["clone", "--depth", "1", "--branch", git_ref, REPOSITORY])
         .arg(&staging)
-        .status()
-        .expect("run git clone for c-ares");
+        .status()?;
     assert!(
         status.success(),
         "failed to clone c-ares {git_ref}; set CARES_DIR to a local CMake source tree for offline \
@@ -106,7 +107,7 @@ fn clone_into_target(target: &Path, git_ref: &str, stable: bool) -> PathBuf {
         is_source_tree(&staging),
         "invalid cloned c-ares source tree"
     );
-    verify_cached_ref(&staging, git_ref, stable);
+    verify_cached_ref(&staging, git_ref, stable)?;
     if let Err(error) = fs::rename(&staging, &cache) {
         // Independent Cargo target builds may populate the shared source cache.
         assert!(
@@ -114,13 +115,13 @@ fn clone_into_target(target: &Path, git_ref: &str, stable: bool) -> PathBuf {
             "cannot install c-ares cache at {}: {error}",
             cache.display()
         );
-        fs::remove_dir_all(&staging).expect("remove redundant c-ares fetch");
+        fs::remove_dir_all(&staging)?;
     }
-    verify_cached_ref(&cache, git_ref, stable);
-    cache
+    verify_cached_ref(&cache, git_ref, stable)?;
+    Ok(cache)
 }
 
-fn resolve_source(manifest: &Path, out_dir: &Path) -> PathBuf {
+fn resolve_source(manifest: &Path, out_dir: &Path) -> BuildResult<PathBuf> {
     if let Some(configured) = env::var_os("CARES_DIR") {
         let source = PathBuf::from(configured);
         assert!(
@@ -128,10 +129,10 @@ fn resolve_source(manifest: &Path, out_dir: &Path) -> PathBuf {
             "CARES_DIR={} does not point to a valid c-ares CMake source tree",
             source.display()
         );
-        return fs::canonicalize(source).expect("resolve CARES_DIR");
+        return Ok(fs::canonicalize(source)?);
     }
     let target = target_root(manifest, out_dir);
-    fs::create_dir_all(&target).expect("create c-ares cache directory");
+    fs::create_dir_all(&target)?;
     let stable = cfg!(feature = "stable");
     let git_ref = if stable { STABLE_TAG } else { DEFAULT_BRANCH };
     clone_into_target(&target, git_ref, stable)
@@ -151,10 +152,9 @@ fn build_static_library(source: &Path) -> PathBuf {
         .build()
 }
 
-fn verify_threadless_configuration(install: &Path) {
+fn verify_threadless_configuration(install: &Path) -> BuildResult<()> {
     let config = install.join("build/ares_config.h");
-    let contents = fs::read_to_string(&config)
-        .unwrap_or_else(|error| panic!("read {}: {error}", config.display()));
+    let contents = fs::read_to_string(&config)?;
     assert!(
         !contents.lines().any(|line| {
             line.trim()
@@ -163,9 +163,10 @@ fn verify_threadless_configuration(install: &Path) {
         }),
         "c-ares enabled thread support despite CARES_THREADS=OFF"
     );
+    Ok(())
 }
 
-fn verify_modern_headers(install: &Path, out_dir: &Path) {
+fn verify_modern_headers(install: &Path, out_dir: &Path) -> BuildResult<()> {
     let probe = out_dir.join("cares_header_contract.c");
     fs::write(
         &probe,
@@ -174,46 +175,47 @@ fn verify_modern_headers(install: &Path, out_dir: &Path) {
          ABI\");\nvoid cares_header_contract(void) \
          {\n(void)&ares_set_socket_functions_ex;\n(void)&ares_process_fds;\n(void)&\
          ares_query_dnsrec;\n(void)&ares_dns_record_create;\n}\n",
-    )
-    .expect("write modern c-ares header contract");
+    )?;
     let objects = cc::Build::new()
         .file(&probe)
         .include(install.join("include"))
         .flag_if_supported("-std=c11")
         .warnings_into_errors(true)
-        .compile_intermediates();
+        .try_compile_intermediates()?;
     assert!(
         !objects.is_empty(),
         "c-ares header contract produced no object"
     );
+    Ok(())
 }
 
-fn main() {
+fn main() -> BuildResult<()> {
     println!("cargo:rerun-if-env-changed=CARES_DIR");
     println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=tests/abi_probe.c");
-    let target_os = env::var("CARGO_CFG_TARGET_OS").expect("target OS");
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").expect("target architecture");
+    let target_os = env::var("CARGO_CFG_TARGET_OS")?;
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH")?;
     assert!(
         target_os == "linux" && target_arch == "x86_64",
         "cares-sys supports Linux x86_64 targets"
     );
-    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
-    let source = resolve_source(&manifest, &out_dir);
+    let manifest =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").ok_or("CARGO_MANIFEST_DIR is missing")?);
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").ok_or("OUT_DIR is missing")?);
+    let source = resolve_source(&manifest, &out_dir)?;
     for relative in ["CMakeLists.txt", "cmake", "include", "src/lib"] {
         println!("cargo:rerun-if-changed={}", source.join(relative).display());
     }
     let install = build_static_library(&source);
-    verify_threadless_configuration(&install);
-    verify_modern_headers(&install, &out_dir);
+    verify_threadless_configuration(&install)?;
+    verify_modern_headers(&install, &out_dir)?;
     cc::Build::new()
         .file(manifest.join("tests/abi_probe.c"))
         .include(install.join("include"))
         .flag_if_supported("-std=c11")
         .warnings_into_errors(true)
-        .compile("cares_sys_abi_probe");
+        .try_compile("cares_sys_abi_probe")?;
     let lib_dir = install.join("lib");
     assert!(
         lib_dir.join("libcares.a").is_file(),
@@ -227,4 +229,5 @@ fn main() {
         "cargo:rustc-env=CARES_INCLUDE_DIR={}",
         install.join("include").display()
     );
+    Ok(())
 }
