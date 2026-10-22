@@ -193,11 +193,21 @@ A port defaults to the configured UDP or TCP port, then to 53. `%iface` applies 
 
 ## Testing
 
-The integration suite runs against a deterministic localhost DNS server:
+The suites are organized into four dimensions.
+
+- **Integration test** — `record_and_options_tests.rs` covers DNS wire encoding and decoding, all fourteen typed RR models, extended RCODE/OPT validation, and option bounds. `socket_bridge_and_timer_tests.rs` covers the ten `ares_socket_functions_ex` hooks, the deferred re-entrancy queue, `TimerState` re-arm generations, and sink panic isolation.
+- **Lifecycle test** — `resolver_lifecycle_and_framing.rs` covers `LibraryGuard`-serialized initialization, concurrent submissions, sibling cancellation on one shared socket, cross-resolver handle rejection, and dropping a resolver with a pending query (destruction callback plus per-cycle descriptor balance). `proactor_timeout.rs` covers timer-driven teardown through a real `liburing::Proactor`.
+- **Scenario test** — `adversarial_e2e.rs` covers fourteen record families, `TC=1` fallback, timeout-driven failover, cancellation, re-entrant follow-up queries, and panic poisoning. `resolver_lifecycle_and_framing.rs` adds one-byte TCP prefix/body fragmentation, multi-frame coalescing, `ECONNREFUSED` failover, and single-server packet-loss retry.
+- **E2E test** — `adversarial_e2e.rs` drives a real `liburing::Proactor` with `ProactorResolver` (initial bridge capacity 1, so the UDP and TCP descriptors force registration growth), NOP and timeout completions, and full-chain resolution through `MockDnsServer`. `proactor_timeout.rs` proves the proactor-armed c-ares timer expires a black-holed query. `proactor_stress.rs` chains 10,000 queries through the same ring, each completion submitting the next.
 
 ```bash
 cargo test -p cares --test mock_dns_server
-cargo test -p cares --test adversarial_e2e -- --nocapture
+cargo test -p cares --test record_and_options_tests
+cargo test -p cares --test socket_bridge_and_timer_tests
+cargo test -p cares --test adversarial_e2e
+cargo test -p cares --test resolver_lifecycle_and_framing
+cargo test -p cares --test proactor_timeout
+cargo test -p cares --test proactor_stress
 ```
 
 The full workspace gate is:
@@ -209,7 +219,7 @@ cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 ```
 
-The adversarial suite covers fourteen record families over UDP and TCP, `TC=1` fallback and explicit `USE_TCP`, timeout-driven retries and server failover, per-query and channel-wide cancellation, re-entrant follow-up queries, panic poisoning, and a 10,000-query stress run followed by a fresh-resolver teardown check. The mock server's own tests cover UDP and TCP round trips and UDP truncation; the adversarial suite drives the remaining fault and recovery paths through the public resolver. The suite runs on a Linux x86_64 host; a kernel with `io_uring` is required only when the application's own proactor uses `io_uring`.
+The io_uring E2E tests skip when ring creation reports `EPERM`, `EACCES`, or `ENOSYS`. All other suites run on any Linux x86_64 host.
 
 ## Features and Limitations
 
