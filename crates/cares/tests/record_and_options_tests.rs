@@ -1,7 +1,6 @@
 //! Wire-format, configuration ownership, and synchronous callback contracts.
 
 #![allow(clippy::expect_used, reason = "Test assertions fail with context.")]
-
 use std::{
     cell::{Cell, RefCell},
     ffi::CStr,
@@ -20,6 +19,8 @@ use cares::{
     types::{DnsClass, DnsFlags, DnsRecordType, DnsSection},
 };
 use cares_sys as sys;
+#[path = "support/opt_validation.rs"]
+mod opt_validation;
 
 fn round_trip<T>(value: T) -> Result<()>
 where

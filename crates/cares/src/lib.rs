@@ -303,11 +303,11 @@ mod support {
 
     impl ResolverHost {
         pub(crate) fn is_poisoned(&self) -> bool {
-            self.state.is_poisoned()
+            self.state.is_poisoned() || self.sockets.readiness_sink_failed()
         }
         /// Returns the live channel, rejecting a poisoned or destroyed resolver.
         pub(crate) fn ready(&self) -> Result<*mut sys::ares_channel_t> {
-            if self.state.is_poisoned() {
+            if self.is_poisoned() {
                 return Err(AresError::CallbackPanicked);
             }
             let channel = self.channel.get();
@@ -616,6 +616,14 @@ mod support {
     }
 
     /// Forwards one server health transition to the registered Rust closure.
+    ///
+    /// # Safety
+    /// `data` must be non-null and point to the registered `ResolverHost` allocation,
+    /// which must remain alive throughout this callback and every callback issued
+    /// during channel destruction. If non-null, `server_string` must point to a
+    /// readable NUL-terminated C string valid for the duration of this call. The
+    /// callback must execute on the channel owner thread without an exclusive
+    /// reference to the host.
     pub(crate) unsafe extern "C" fn server_state_trampoline(
         server_string: *const c_char,
         success: sys::ares_bool_t,

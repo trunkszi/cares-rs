@@ -1,9 +1,9 @@
 //! Integration tests for `socket_bridge` and `timer`.
 
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     io,
-    rc::{Rc, Weak},
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -663,132 +663,5 @@ fn scenario_ready_for_closed_or_unowned_descriptors_is_discarded() {
     assert!(events.is_empty());
 }
 
-fn isolated_case(name: &str, mode: &str) -> bool {
-    if let Ok(child_mode) = std::env::var("CARES_BRIDGE_TEST_CHILD") {
-        return child_mode != mode;
-    }
-    let executable =
-        std::env::current_exe().unwrap_or_else(|error| panic!("test executable: {error}"));
-    let status = std::process::Command::new(executable)
-        .args(["--exact", name, "--nocapture"])
-        .env("CARES_BRIDGE_TEST_CHILD", mode)
-        .status()
-        .unwrap_or_else(|error| panic!("start isolated callback case: {error}"));
-    assert!(status.success(), "callback case {mode} failed: {status}");
-    true
-}
-
-struct ReentrantSink {
-    state: Weak<SharedChannelState>,
-    entered: Cell<bool>,
-    removals: RefCell<Vec<ares_socket_t>>,
-    replacement: RefCell<Option<std::net::UdpSocket>>,
-}
-impl ReadinessSink for ReentrantSink {
-    fn update_interest(&self, _fd: ares_socket_t, _interest: SocketInterest) {}
-    fn remove_interest(&self, fd: ares_socket_t) {
-        self.removals.borrow_mut().push(fd);
-        if self.entered.replace(true) {
-            return;
-        }
-        let state = self
-            .state
-            .upgrade()
-            .unwrap_or_else(|| panic!("state remains live"));
-        state.shutdown();
-        if get_status_flags(fd) < 0 {
-            use std::os::fd::AsRawFd;
-            let replacement = std::net::UdpSocket::bind("127.0.0.1:0")
-                .unwrap_or_else(|error| panic!("replacement socket: {error}"));
-            assert_eq!(replacement.as_raw_fd(), fd, "isolated fd must be reusable");
-            *self.replacement.borrow_mut() = Some(replacement);
-        }
-    }
-}
-
-#[test]
-fn lifecycle_scenario_reentrant_shutdown_closes_each_descriptor_once() {
-    let name = "lifecycle_scenario_reentrant_shutdown_closes_each_descriptor_once";
-    if isolated_case(name, "reentrant") {
-        return;
-    }
-    let state = Rc::new(SharedChannelState::new());
-    let sink = Rc::new(ReentrantSink {
-        state: Rc::downgrade(&state),
-        entered: Cell::new(false),
-        removals: RefCell::new(Vec::new()),
-        replacement: RefCell::new(None),
-    });
-    state.set_readiness_sink(sink.clone());
-    let fd = open_datagram(&state);
-    state.shutdown();
-    if let Some(replacement) = sink.replacement.borrow().as_ref() {
-        use std::os::fd::AsRawFd;
-        assert!(
-            get_status_flags(replacement.as_raw_fd()) >= 0,
-            "reused fd was closed twice"
-        );
-    }
-    assert_eq!(*sink.removals.borrow(), [fd]);
-    assert_eq!(state.socket_count(), 0);
-    state.shutdown();
-    assert_eq!(*sink.removals.borrow(), [fd]);
-}
-
-struct PanickingSink {
-    state: Weak<SharedChannelState>,
-    panic_on_drop: bool,
-}
-impl Drop for PanickingSink {
-    fn drop(&mut self) {
-        assert!(!self.panic_on_drop, "user sink destructor failed");
-    }
-}
-impl ReadinessSink for PanickingSink {
-    fn update_interest(&self, _fd: ares_socket_t, _interest: SocketInterest) {
-        if self.panic_on_drop {
-            let state = self.state.upgrade().unwrap_or_else(|| panic!("live state"));
-            state.set_readiness_sink(Rc::new(RecordingSink::default()));
-        }
-        panic!("user update callback failed");
-    }
-    fn remove_interest(&self, _fd: ares_socket_t) {
-        panic!("user removal callback failed");
-    }
-}
-
-#[test]
-fn scenario_extern_callbacks_contain_sink_panics_and_fail_closed() {
-    let name = "scenario_extern_callbacks_contain_sink_panics_and_fail_closed";
-    for mode in ["update-panic", "close-panic", "drop-panic"] {
-        if isolated_case(name, mode) {
-            continue;
-        }
-        let state = Rc::new(SharedChannelState::new());
-        state.set_readiness_sink(Rc::new(PanickingSink {
-            state: Rc::downgrade(&state),
-            panic_on_drop: mode == "drop-panic",
-        }));
-        let fd = open_datagram(&state);
-        let (callback, data) = state.sock_state_binding();
-        if mode != "close-panic" {
-            let callback = callback.unwrap_or_else(|| panic!("socket state callback"));
-            // SAFETY: data comes from this live stable state; fd is owned by it.
-            unsafe { callback(data, fd, 1, 0) };
-        } else {
-            let close = SOCKET_FUNCTIONS
-                .aclose
-                .unwrap_or_else(|| panic!("close callback"));
-            // SAFETY: data comes from this live stable state; fd is owned by it.
-            assert_eq!(unsafe { close(fd, data) }, -1);
-            assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::EIO));
-        }
-        assert_eq!(state.socket_count(), 0);
-        assert!(!state.has_pending());
-        assert!(
-            state
-                .open_socket(libc::AF_INET, libc::SOCK_DGRAM, 0)
-                .is_err()
-        );
-    }
-}
+#[path = "socket_bridge_and_timer_tests/lifecycle.rs"]
+mod lifecycle;

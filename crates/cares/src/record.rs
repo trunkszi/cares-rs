@@ -215,30 +215,46 @@ macro_rules! read_methods {
         }
 
         fn validate_wire_header(&self) -> Result<()> {
-            // SAFETY: self owns or borrows a live immutable DNS message.
-            let rcode = unsafe { sys::ares_dns_record_get_rcode(self.as_ptr()) }.0;
-            if rcode <= 15 {
-                return Ok(());
-            }
-            for index in 0..self.rr_count(DnsSection::Additional) {
-                let rr = self.rr(DnsSection::Additional, index)?;
-                // SAFETY: rr borrows live immutable storage owned by this message.
-                if unsafe { sys::ares_dns_rr_get_type(rr.as_ptr()) } == sys::ARES_REC_TYPE_OPT {
-                    return Ok(());
+            let mut has_opt = false;
+            for section in [
+                DnsSection::Answer,
+                DnsSection::Authority,
+                DnsSection::Additional,
+            ] {
+                for index in 0..self.rr_count(section) {
+                    let rr = self.rr(section, index)?;
+                    // SAFETY: rr borrows live immutable storage owned by this message.
+                    if unsafe { sys::ares_dns_rr_get_type(rr.as_ptr()) } != sys::ARES_REC_TYPE_OPT {
+                        continue;
+                    }
+                    if has_opt
+                        || section != DnsSection::Additional
+                        || !matches!(rr.name()?, "" | ".")
+                    {
+                        return Err(AresError::invalid_record(
+                            "DNS message permits only one root-owned OPT in Additional",
+                        ));
+                    }
+                    has_opt = true;
                 }
             }
-            // c-ares substitutes SERVFAIL when an extended response code lacks OPT.
-            Err(AresError::invalid_record(
-                "extended DNS response code requires an Additional OPT record",
-            ))
+            // SAFETY: self owns or borrows a live immutable DNS message.
+            let rcode = unsafe { sys::ares_dns_record_get_rcode(self.as_ptr()) }.0;
+            if rcode > 15 && !has_opt {
+                // c-ares substitutes SERVFAIL when an extended response code lacks OPT.
+                return Err(AresError::invalid_record(
+                    "extended DNS response code requires an Additional OPT record",
+                ));
+            }
+            Ok(())
         }
 
         /// Serialize the complete DNS message into an owned wire buffer.
         ///
         /// # Errors
         /// Returns an error if the record is incomplete or allocation fails.
-        /// Returns [`AresError::InvalidRecord`] if an extended response code
-        /// has no OPT record in the Additional section.
+        /// Returns [`AresError::InvalidRecord`] for duplicate, non-root, or misplaced
+        /// OPT records, or an extended response code without an Additional OPT.
         ///
         /// # Panics
         /// This function has no explicit panic path.
@@ -369,8 +385,8 @@ impl DnsRecord {
     /// Duplicate this message into independent c-ares storage.
     ///
     /// # Errors
-    /// Returns [`AresError::InvalidRecord`] if an extended response code
-    /// has no OPT record in the Additional section.
+    /// Returns [`AresError::InvalidRecord`] for duplicate, non-root, or misplaced
+    /// OPT records, or an extended response code without an Additional OPT.
     /// Returns [`AresError::AllocationFailed`] if duplication fails, including
     /// invalid or incomplete messages rejected by c-ares during duplication.
     ///
@@ -627,8 +643,8 @@ impl<'cb> DnsRecordRef<'cb> {
     /// Duplicate the borrowed message into independent owned storage.
     ///
     /// # Errors
-    /// Returns [`AresError::InvalidRecord`] if an extended response code
-    /// has no OPT record in the Additional section.
+    /// Returns [`AresError::InvalidRecord`] for duplicate, non-root, or misplaced
+    /// OPT records, or an extended response code without an Additional OPT.
     /// Returns [`AresError::AllocationFailed`] if duplication fails, including
     /// invalid or incomplete messages rejected by c-ares during duplication.
     ///

@@ -418,7 +418,10 @@ fn tcp_prefix_and_body_fragmentation_reassembled() -> TestResult {
     let mut resolver = framing_resolver_for(&server, Duration::from_millis(500))?;
     let record = query_owned(&mut resolver, "framed.test.", DnsRecordType::A, TIMEOUT)?;
     assert_eq!(a_address(&record)?, Ipv4Addr::new(192, 0, 2, 71));
-    let stats = &server.stats;
+    assert_eq!(resolver.active_queries(), 0, "queries left in flight");
+    let stats = Arc::clone(&server.stats);
+    drop(resolver);
+    drop(server); // Join writers before observing their final byte/write counters.
     assert_eq!(
         stats.connections.load(Ordering::Acquire),
         1,
@@ -442,9 +445,6 @@ fn tcp_prefix_and_body_fragmentation_reassembled() -> TestResult {
         "response was not fragmented one byte per write: {writes} writes for {body_bytes} body \
          bytes"
     );
-    assert_eq!(resolver.active_queries(), 0, "queries left in flight");
-    drop(resolver);
-    drop(server);
     Ok(())
 }
 
