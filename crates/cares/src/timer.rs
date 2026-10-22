@@ -105,8 +105,8 @@ impl TimerState {
     /// Accepts a timeout completion for the currently armed deadline.
     ///
     /// Returns `true` and records the expiry only when `generation` matches the
-    /// current deadline. A completion carrying any other generation belongs to
-    /// a cancelled or superseded SQE and is ignored.
+    /// current deadline. Accepting it consumes the armed deadline, so duplicate
+    /// completions and completions from cancelled or superseded SQEs are ignored.
     ///
     /// # Panics
     /// This function does not panic.
@@ -114,6 +114,7 @@ impl TimerState {
     pub fn on_timer(&self, generation: u64) -> bool {
         match self.deadline.get() {
             Some(deadline) if deadline.generation == generation => {
+                self.deadline.set(None);
                 self.expired.set(true);
                 true
             }
@@ -124,7 +125,8 @@ impl TimerState {
     /// Returns and clears the recorded expiry flag.
     ///
     /// The flag is one-shot: each accepted [`TimerState::on_timer`] call makes
-    /// this method return `true` at most once.
+    /// this method return `true` at most once. Refreshing preserves a recorded
+    /// expiry until it is taken here or cleared by [`TimerState::disarm`].
     ///
     /// # Panics
     /// This function does not panic.
@@ -159,6 +161,8 @@ impl TimerState {
     /// [`DEADLINE_TOLERANCE`] of the armed one, the armed deadline is returned
     /// unchanged: retaining its exact instant guarantees that the returned
     /// value is still the deadline the proactor armed.
+    /// A consumed deadline is unarmed and therefore always receives a fresh
+    /// generation.
     ///
     /// # Panics
     /// This function does not panic.
