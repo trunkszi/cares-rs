@@ -4,7 +4,7 @@ Operational contract for coding agents working in `cares-rs`. This file is the a
 
 ## Project Overview
 
-`cares-rs` is a safe, threadless, single-threaded, completion-driven Rust 2024 binding for upstream [c-ares](https://github.com/c-ares/c-ares), pinned to `v1.34.9` by the `stable` feature, built on [`liburing-rs`](../liburing-rs). There is no async runtime, no background event thread, no readiness reactor, and no hidden lock inside the library: `c-ares` sockets are real nonblocking descriptors whose readiness and completion events arrive through an `io_uring` proactor on the calling thread. `Resolver`, `ChannelCtx`, and the borrowed record views are `!Send + !Sync`.
+`cares-rs` is a safe, threadless, single-threaded, completion-driven Rust 2024 binding for upstream [c-ares](https://github.com/c-ares/c-ares), pinned to `v1.34.9` by the `stable` feature, built on [`liburing-rs`](../liburing-rs). There is no async runtime, no background event thread, and no external readiness reactor. Standalone mode drives nonblocking descriptors with `poll(2)` through `Resolver::wait_completions`; shared-ring mode delivers readiness and completion events through a `liburing::Proactor` on the calling thread. The only lock in the library is the `LibraryGuard` initialization and cleanup counter mutex; runtime socket-driving paths take no hidden locks. `Resolver`, `ChannelCtx`, and the borrowed record views are `!Send + !Sync`.
 
 `c-ares` is compiled from source with thread support disabled. A resolver therefore has one owner thread, and every completion callback runs synchronously on that thread, including callbacks triggered from inside `ares_query_dnsrec`, `ares_process_fds`, and `ares_destroy`.
 
@@ -45,7 +45,7 @@ cares-rs/
 | Layer | Crate | Responsibilities and dependency boundaries |
 | --- | --- | --- |
 | L1 | `cares-sys` | Resolves or clones the upstream c-ares source tree, builds `libcares.a` with CMake, verifies the threadless configuration and modern header surface, and exposes raw `unsafe` FFI. Depends only on `libc` at runtime and `cmake` + `cc` at build time. Contains no `liburing` code. |
-| L2 | `cares-macros` | Proc-macro crate for `#[derive(DnsRecord)]`, `#[derive(DnsBundle)]`, `dns_name!`, `dns_servers!`, `dns_query!`, and `#[cares_callback]`. Depends on `syn`, `quote`, and `proc-macro2`; it does not depend on `cares` or `cares-sys`. |
+| L2 | `cares-macros` | Proc-macro crate for `#[derive(DnsRecordExtract)]` and `cares_query_table!`: typed record extraction and zero-allocation query routing. Depends on `syn`, `quote`, and `proc-macro2`; it does not depend on `cares` or `cares-sys`. |
 | L3 | `cares` | Depends on `cares-sys`, `cares-macros`, `liburing`, `liburing-macros`, `libc`, `bitflags`, and `thiserror`. Owns the safe API: errors, DNS types, owned records and callback-scoped views, typed RR models, options, callback slots and trampolines, the socket bridge, the timer state, and `Resolver`. |
 
 Dependencies point downward only. `cares-sys` and `cares-macros` must never depend on `cares`; `cares` must never reach into `cares-sys` internals through a module path rather than its public re-exports.
@@ -61,7 +61,7 @@ Dependencies point downward only. `cares-sys` and `cares-macros` must never depe
 | `cares-sys/src/types.rs` | L1 | C layouts, opaque handles, and callback function-pointer types. |
 | `cares-sys/src/socket_ex.rs` | L1 | The 10-hook `ares_socket_functions_ex` vtable for ABI version 1. |
 | `cares-sys/src/dns_rec.rs` | L1 | DNS record creation, query and RR access, wire parse/write, duplicate, and destroy. |
-| `cares-macros/src/lib.rs` | L2 | Compile-time domain, server-list, and query validation; derive macros for record conversion and bundled queries. |
+| `cares-macros/src/lib.rs` | L2 | `DnsRecordExtract` derive and `cares_query_table!` query-slot validation and routing generation. |
 | `cares/src/error.rs` | L3 | `AresError`, `AresStatus`, `ErrorKind`, and `Result`. |
 | `cares/src/types.rs` | L3 | `DnsRecordType`, `DnsClass`, `DnsSection`, `DnsOpcode`, `DnsRcode`, `DnsFlags`, `ServerStateFlags`, `HostEntry`, `NameInfo`, and `SocketAddress`. |
 | `cares/src/record.rs` | L3 | Owned `DnsRecord`, callback-scoped `DnsRecordRef<'cb>`, `DnsRecordBuilder`, and the `FromDnsRecord` / `IntoDnsRecord` traits. |
@@ -93,7 +93,7 @@ Run every command from the workspace root. These are the commands to run; do not
 | `cargo run -p cares --example proactor_shared_ring_resolver` | Run the shared-ring proactor example. |
 | `bash .github/scripts/ci-incremental.sh` | Full incremental gate in the integrated workspace. |
 
-`.github/scripts/ci-incremental.sh` is added when the workspace is integrated and is not present in this worktree. When it is absent, run the equivalent commands in the table above; when it is present, run it before completing a change.
+`.github/scripts/ci-incremental.sh` is tracked in this workspace; run it before completing a change.
 
 The workspace has three required example targets under `crates/cares/examples/`. Run each one before completing a change:
 
