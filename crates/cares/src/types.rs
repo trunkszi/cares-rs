@@ -1,8 +1,10 @@
 //! Typed DNS constants and network endpoint values.
 
-use std::fmt;
-use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
-use std::str::FromStr;
+use std::{
+    fmt,
+    net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6},
+    str::FromStr,
+};
 
 use crate::error::{AresError, Result};
 

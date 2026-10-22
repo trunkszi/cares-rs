@@ -1,13 +1,12 @@
 //! Owned resolver configuration and a borrowing view of its C representation.
 
-use crate::error::{AresError, Result};
+use std::{
+    ffi::CString, fmt, net::Ipv4Addr, os::unix::ffi::OsStrExt, path::Path, ptr, time::Duration,
+};
+
 use bitflags::bitflags;
-use std::ffi::CString;
-use std::fmt;
-use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
-use std::ptr;
-use std::time::Duration;
+
+use crate::error::{AresError, Result};
 
 bitflags! {
     /// Channel behavior flags, distinct from DNS message header flags.
@@ -80,6 +79,7 @@ pub struct ResolverBuilder {
     receive_buffer: Option<usize>,
     edns_payload_size: Option<u32>,
     domains: Option<Vec<Vec<u8>>>,
+    servers: Option<Vec<Ipv4Addr>>,
     lookups: Option<Vec<u8>>,
     resolvconf_path: Option<Vec<u8>>,
     hosts_path: Option<Vec<u8>>,
@@ -97,6 +97,7 @@ pub struct ResolverOptions {
     raw: cares_sys::ares_options,
     optmask: libc::c_int,
     _domains: Vec<CString>,
+    _servers: Box<[libc::in_addr]>,
     _domain_pointers: Box<[*mut libc::c_char]>,
     _lookups: Option<CString>,
     _resolvconf_path: Option<CString>,
@@ -118,6 +119,7 @@ impl Default for ResolverOptions {
             raw: empty_options(),
             optmask: 0,
             _domains: Vec::new(),
+            _servers: Box::default(),
             _domain_pointers: Box::default(),
             _lookups: None,
             _resolvconf_path: None,
@@ -357,6 +359,18 @@ impl ResolverBuilder {
         self
     }
 
+    /// Replaces the IPv4 servers passed directly to `ares_init_options`.
+    ///
+    /// c-ares' options structure represents IPv4 addresses only. IPv6 endpoints
+    /// and per-server ports require the channel's server-list setter.
+    ///
+    /// # Panics
+    /// Panics from the supplied iterator propagate; allocation follows Rust's policy.
+    pub fn servers(mut self, servers: impl IntoIterator<Item = Ipv4Addr>) -> Self {
+        self.servers = Some(servers.into_iter().collect());
+        self
+    }
+
     /// Replaces the ordered search-domain list.
     ///
     /// # Panics
@@ -514,6 +528,21 @@ impl ResolverBuilder {
             raw.ednspsz = checked_int(size as u128, "EDNS payload size")?;
             *mask |= cares_sys::ARES_OPT_EDNSPSZ;
         }
+        if let Some(servers) = self.servers {
+            raw.nservers = checked_int(servers.len() as u128, "server count")?;
+            result._servers = servers
+                .into_iter()
+                .map(|address| libc::in_addr {
+                    s_addr: u32::from_ne_bytes(address.octets()),
+                })
+                .collect();
+            raw.servers = if result._servers.is_empty() {
+                ptr::null_mut()
+            } else {
+                result._servers.as_mut_ptr()
+            };
+            *mask |= cares_sys::ARES_OPT_SERVERS;
+        }
         if let Some(domains) = self.domains {
             raw.ndomains = checked_int(domains.len() as u128, "search domain count")?;
             result._domains = domains
@@ -572,7 +601,7 @@ impl ResolverBuilder {
             *mask |= cares_sys::ARES_OPT_QUERY_CACHE;
         }
         if let Some((chance, delay)) = self.server_failover {
-            if delay.subsec_nanos() % 1_000_000 != 0 {
+            if !delay.subsec_nanos().is_multiple_of(1_000_000) {
                 return Err(AresError::invalid_input(
                     "server failover requires a whole-millisecond delay",
                 ));
@@ -617,7 +646,7 @@ fn positive_int(value: u128, field: &str) -> Result<libc::c_int> {
 }
 
 fn milliseconds(value: Duration, field: &str) -> Result<libc::c_int> {
-    if value.subsec_nanos() % 1_000_000 != 0 {
+    if !value.subsec_nanos().is_multiple_of(1_000_000) {
         return Err(AresError::invalid_input(format!(
             "{field} must use whole milliseconds"
         )));
@@ -639,4 +668,92 @@ fn string_pointer(value: &Option<CString>) -> *mut libc::c_char {
     value
         .as_ref()
         .map_or(ptr::null_mut(), |s| s.as_ptr().cast_mut())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_copies_servers_domains_and_lookups_before_options_drop() -> Result<()> {
+        // SAFETY: this unit-test process initializes c-ares once and never
+        // cleans it up while any test-owned C allocations remain live.
+        AresError::check(unsafe { cares_sys::ares_library_init(cares_sys::ARES_LIB_INIT_ALL) })?;
+        let options = ResolverBuilder::new()
+            .servers([Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 0, 2, 53)])
+            .search_domains(["one.test", "two.test"])
+            .lookup_strategy(LookupStrategy::FilesThenDns)
+            .resolvconf_path("/dev/null")
+            .hosts_path("/dev/null")
+            .build()?;
+        let moved = Box::new(options);
+        let (raw, mask) = moved.as_raw();
+        let mut channel = ptr::null_mut();
+        // SAFETY: moved owns every input allocation throughout initialization;
+        // channel points to writable storage for the new channel allocation.
+        AresError::check(unsafe { cares_sys::ares_init_options(&mut channel, raw, mask) })?;
+        struct Channel(*mut cares_sys::ares_channel_t);
+        impl Drop for Channel {
+            fn drop(&mut self) {
+                // SAFETY: this guard uniquely owns the initialized channel.
+                unsafe { cares_sys::ares_destroy(self.0) };
+            }
+        }
+        let channel = Channel(channel);
+        drop(moved);
+        struct Saved(cares_sys::ares_options);
+        impl Drop for Saved {
+            fn drop(&mut self) {
+                // SAFETY: save_options initializes this independent C-owned
+                // options aggregate; destroy_options frees only its contents.
+                unsafe { cares_sys::ares_destroy_options(&mut self.0) };
+            }
+        }
+        let mut saved = Saved(empty_options());
+        let mut mask = 0;
+        // SAFETY: channel is live and the output aggregates are writable;
+        // saved owns all C allocations produced by this call, even on failure.
+        AresError::check(unsafe {
+            cares_sys::ares_save_options(channel.0, &mut saved.0, &mut mask)
+        })?;
+        assert_eq!((saved.0.nservers, saved.0.ndomains), (2, 2));
+        // SAFETY: successful save_options produced the validated counts above
+        // and independently allocated NUL-terminated strings and address data.
+        unsafe {
+            assert_eq!((*saved.0.servers).s_addr.to_ne_bytes(), [127, 0, 0, 1]);
+            assert_eq!(
+                (*saved.0.servers.add(1)).s_addr.to_ne_bytes(),
+                [192, 0, 2, 53]
+            );
+            assert_eq!(
+                std::ffi::CStr::from_ptr(*saved.0.domains).to_bytes(),
+                b"one.test"
+            );
+            assert_eq!(
+                std::ffi::CStr::from_ptr(*saved.0.domains.add(1)).to_bytes(),
+                b"two.test"
+            );
+            assert_eq!(std::ffi::CStr::from_ptr(saved.0.lookups).to_bytes(), b"fb");
+            assert_eq!(
+                std::ffi::CStr::from_ptr(saved.0.resolvconf_path).to_bytes(),
+                b"/dev/null"
+            );
+            assert_eq!(
+                std::ffi::CStr::from_ptr(saved.0.hosts_path).to_bytes(),
+                b"/dev/null"
+            );
+        }
+        let empty = ResolverBuilder::new()
+            .servers([])
+            .search_domains([] as [&str; 0])
+            .build()?;
+        assert!(empty.raw_options().servers.is_null());
+        assert!(empty.raw_options().domains.is_null());
+        assert_eq!(
+            (empty.raw_options().nservers, empty.raw_options().ndomains),
+            (0, 0)
+        );
+        assert_ne!(empty.optmask() & cares_sys::ARES_OPT_SERVERS, 0);
+        Ok(())
+    }
 }

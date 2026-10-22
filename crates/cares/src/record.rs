@@ -1,14 +1,19 @@
 //! Owned DNS messages and callback-scoped views backed by c-ares.
 
-use std::ffi::{CStr, CString};
-use std::marker::PhantomData;
-use std::ptr::{self, NonNull};
-use std::rc::Rc;
+use std::{
+    ffi::{CStr, CString},
+    marker::PhantomData,
+    ptr::{self, NonNull},
+    rc::Rc,
+};
 
-use crate::error::{AresError, Result};
-use crate::record_rr::{DnsRr, DnsRrMut, FromDnsRr, IntoDnsRr};
-use crate::types::{DnsClass, DnsFlags, DnsOpcode, DnsRcode, DnsRecordType, DnsSection};
 use cares_sys as sys;
+
+use crate::{
+    error::{AresError, Result},
+    record_rr::{DnsRr, DnsRrMut, FromDnsRr, IntoDnsRr},
+    types::{DnsClass, DnsFlags, DnsOpcode, DnsRcode, DnsRecordType, DnsSection},
+};
 
 /// A uniquely owned DNS message. Mutation requires exclusive access.
 #[derive(Debug)]
@@ -197,7 +202,7 @@ macro_rules! read_methods {
         /// Returns an error if any matching record has invalid fields.
         ///
         /// # Panics
-        /// This function has no explicit panic path.
+        /// Panics from the caller-provided decoder propagate.
         pub fn records<T: FromDnsRr>(&self, section: DnsSection) -> Result<Vec<T>> {
             let mut records = Vec::new();
             for index in 0..self.rr_count(section) {
@@ -265,7 +270,8 @@ impl DnsRecord {
     pub fn new(id: u16, flags: DnsFlags, opcode: DnsOpcode, rcode: DnsRcode) -> Result<Self> {
         let mut raw = ptr::null_mut();
         AresError::check(
-            // SAFETY: raw is a valid writable output; typed header values use c-ares discriminants.
+            // SAFETY: raw is a valid writable output; typed header values use c-ares
+            // discriminants.
             unsafe {
                 sys::ares_dns_record_create(
                     &mut raw,
@@ -447,7 +453,8 @@ impl DnsRecord {
     /// # Panics
     /// This function has no explicit panic path.
     pub fn query_set_type(&mut self, index: usize, record_type: DnsRecordType) -> Result<()> {
-        // SAFETY: exclusive access protects question storage and the type uses a valid discriminant.
+        // SAFETY: exclusive access protects question storage and the type uses a valid
+        // discriminant.
         AresError::check(unsafe {
             sys::ares_dns_record_query_set_type(
                 self.raw.as_ptr(),
@@ -481,7 +488,8 @@ impl DnsRecord {
     /// # Panics
     /// This function has no explicit panic path.
     pub fn rr_del(&mut self, section: DnsSection, index: usize) -> Result<()> {
-        // SAFETY: exclusive access prevents live views from observing relocated or freed RR storage.
+        // SAFETY: exclusive access prevents live views from observing relocated or freed RR
+        // storage.
         AresError::check(unsafe {
             sys::ares_dns_record_rr_del(self.raw.as_ptr(), section.as_raw().into(), index)
         })
@@ -519,7 +527,8 @@ impl DnsRecord {
             }
             .0 as i32,
         )?;
-        // SAFETY: the RR is owned by this exclusively borrowed message and cannot move until release.
+        // SAFETY: the RR is owned by this exclusively borrowed message and cannot move until
+        // release.
         unsafe { DnsRrMut::from_raw(raw) }
     }
 
@@ -529,7 +538,7 @@ impl DnsRecord {
     /// Returns an error for invalid fields or allocation failure.
     ///
     /// # Panics
-    /// This function has no explicit panic path.
+    /// Panics from the caller-provided encoder propagate; the appended RR remains in the message.
     pub fn add_record<T: IntoDnsRr>(
         &mut self,
         section: DnsSection,
@@ -667,7 +676,7 @@ impl DnsRecordBuilder {
     /// Append a question to be validated at build time.
     ///
     /// # Panics
-    /// This function has no explicit panic path.
+    /// Panics from the supplied name conversion propagate.
     pub fn question(
         mut self,
         name: impl Into<String>,

@@ -1,17 +1,22 @@
 //! Reentrant, single-threaded callback ownership and C unwind boundaries.
 
-use std::any::Any;
-use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
-use std::ffi::{CStr, c_char, c_int, c_void};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::rc::Rc;
+use std::{
+    any::Any,
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    ffi::{CStr, c_char, c_int, c_void},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    panic::{AssertUnwindSafe, catch_unwind},
+    rc::Rc,
+};
 
-use crate::error::{AresError, AresStatus, Result};
-use crate::record::DnsRecordRef;
-use crate::types::{HostEntry, NameInfo, ServerStateFlags};
 use cares_sys as sys;
+
+use crate::{
+    error::{AresError, AresStatus, Result},
+    record::DnsRecordRef,
+    types::{HostEntry, NameInfo, ServerStateFlags},
+};
 
 /// A panic caught at the C callback boundary.
 pub type PanicPayload = Box<dyn Any + Send + 'static>;
@@ -20,6 +25,9 @@ pub type PanicPayload = Box<dyn Any + Send + 'static>;
 ///
 /// Completion belongs to an individual [`CallbackSlot`]. The state completion
 /// flag indicates that some callback completed; it must not reclaim other slots.
+/// Once poisoned, pending slots complete without user delivery and queued
+/// notifications are discarded. Disabled closures are dropped inside an unwind
+/// boundary so their destructors cannot unwind through C.
 #[derive(Default)]
 pub struct CallbackState {
     poisoned: Cell<bool>,
@@ -222,10 +230,15 @@ where
     let state = Rc::clone(slot.state());
     if let Some(callback) = slot.take() {
         state.enter();
+        let suppressed = state.is_poisoned();
         // Conversion, invocation, and destruction of the owned FnOnce closure
         // all occur within the boundary. No slot borrow reaches user code.
         if let Err(payload) = catch_unwind(AssertUnwindSafe(move || {
-            callback(prepare(), timeouts);
+            if suppressed {
+                drop(callback);
+            } else {
+                callback(prepare(), timeouts);
+            }
         })) {
             state.poison(payload);
         }
@@ -257,8 +270,13 @@ pub unsafe extern "C" fn dns_trampoline<F>(
     unsafe {
         invoke_once::<F, _>(arg, timeouts, || {
             let status = AresStatus::from(status);
-            if status != AresStatus::Success || record.is_null() {
+            if status != AresStatus::Success {
                 return Err(AresError::from_status(status));
+            }
+            if record.is_null() {
+                return Err(AresError::invalid_record(
+                    "successful DNS callback has no record",
+                ));
             }
             DnsRecordRef::from_raw(record)
         });
@@ -488,6 +506,8 @@ where
                 self.state.leave();
                 if let Err(payload) = result {
                     self.state.poison(payload);
+                }
+                if self.state.is_poisoned() {
                     // Drop the disabled callback in a separate boundary so a
                     // destructor panic cannot unwind through the C frame.
                     if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(callback))) {
@@ -576,5 +596,90 @@ pub unsafe extern "C" fn sock_state_trampoline<F>(
             readable: readable != 0,
             writable: writable != 0,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type Handler = Box<dyn for<'cb> FnOnce(Result<DnsRecordRef<'cb>>, usize)>;
+
+    fn finish(state: &Rc<CallbackState>, callback: Handler) -> bool {
+        let slot = CallbackSlot::new(Rc::clone(state), callback);
+        // SAFETY: one exact matching Rc is transferred into the trampoline;
+        // the error status requires no DNS record and delivery happens once.
+        unsafe {
+            dns_trampoline::<Handler>(
+                Rc::into_raw(Rc::clone(&slot)).cast_mut().cast(),
+                sys::ARES_ENOTFOUND,
+                0,
+                std::ptr::null(),
+            );
+        }
+        slot.is_completed()
+    }
+
+    #[test]
+    fn nested_poison_discards_notifications_queued_before_the_panic() {
+        type Callback = Box<dyn FnMut(usize)>;
+        type Slot = NotificationSlot<Callback, usize>;
+        let state = Rc::new(CallbackState::new());
+        let weak: Rc<RefCell<std::rc::Weak<Slot>>> = Rc::default();
+        let weak_capture = Rc::clone(&weak);
+        let nested_state = Rc::clone(&state);
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_capture = Rc::clone(&calls);
+        let callback: Callback = Box::new(move |event| {
+            calls_capture.borrow_mut().push(event);
+            if event == 1 {
+                let slot = match weak_capture.borrow().upgrade() {
+                    Some(slot) => slot,
+                    None => panic!("notification owner missing"),
+                };
+                slot.deliver(2);
+                assert!(finish(
+                    &nested_state,
+                    Box::new(|_, _| panic!("nested panic"))
+                ));
+            }
+        });
+        let slot = NotificationSlot::new(Rc::clone(&state), callback);
+        *weak.borrow_mut() = Rc::downgrade(&slot);
+        slot.deliver(1);
+        assert_eq!(*calls.borrow(), [1]);
+        assert!(slot.pending.borrow().is_empty());
+        assert!(slot.callback.borrow().is_none());
+        assert!(state.is_poisoned());
+        assert_eq!(state.depth(), 0);
+    }
+
+    #[test]
+    fn poisoned_completions_suppress_user_code_and_catch_destructor_panics() {
+        struct PanicOnDrop;
+        impl Drop for PanicOnDrop {
+            fn drop(&mut self) {
+                panic!("disabled closure destructor");
+            }
+        }
+        let state = Rc::new(CallbackState::new());
+        state.poison(Box::new("original panic"));
+        let calls = Rc::new(Cell::new(0));
+        let capture = Rc::clone(&calls);
+        let dropper = PanicOnDrop;
+        assert!(finish(
+            &state,
+            Box::new(move |_, _| {
+                let _keep_alive = &dropper;
+                capture.set(capture.get() + 1);
+            })
+        ));
+        assert_eq!(calls.get(), 0);
+        assert_eq!(state.depth(), 0);
+        let payload = state.take_panic();
+        assert_eq!(
+            payload.as_ref().and_then(|p| p.downcast_ref::<&str>()),
+            Some(&"original panic")
+        );
     }
 }

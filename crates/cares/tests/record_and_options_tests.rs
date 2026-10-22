@@ -2,19 +2,23 @@
 
 #![allow(clippy::expect_used, reason = "Test assertions fail with context.")]
 
-use std::cell::{Cell, RefCell};
-use std::ffi::CStr;
-use std::fmt::Debug;
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::rc::{Rc, Weak};
-use std::time::Duration;
+use std::{
+    cell::{Cell, RefCell},
+    ffi::CStr,
+    fmt::Debug,
+    net::{Ipv4Addr, Ipv6Addr},
+    rc::{Rc, Weak},
+    time::Duration,
+};
 
-use cares::callbacks::{self, CallbackSlot, CallbackState, NotificationSlot, SocketStateEvent};
-use cares::error::{AresError, AresStatus, ErrorKind, Result};
-use cares::options::{LookupStrategy, ResolverBuilder, ResolverOptions};
-use cares::record::{DnsRecord, DnsRecordRef};
-use cares::record_rr::*;
-use cares::types::{DnsClass, DnsFlags, DnsRecordType, DnsSection};
+use cares::{
+    callbacks::{self, CallbackSlot, CallbackState, NotificationSlot, SocketStateEvent},
+    error::{AresError, AresStatus, ErrorKind, Result},
+    options::{LookupStrategy, ResolverBuilder, ResolverOptions},
+    record::{DnsRecord, DnsRecordRef},
+    record_rr::*,
+    types::{DnsClass, DnsFlags, DnsRecordType, DnsSection},
+};
 use cares_sys as sys;
 
 fn round_trip<T>(value: T) -> Result<()>
@@ -126,6 +130,29 @@ fn all_fourteen_typed_records_round_trip() -> Result<()> {
         target: "svc.test".into(),
         params,
     })?;
+    Ok(())
+}
+
+#[test]
+fn txt_rejects_unrepresentable_segments_without_changing_existing_data() -> Result<()> {
+    let mut record = DnsRecord::builder()
+        .question("txt.test", DnsRecordType::TXT, DnsClass::IN)
+        .build()?;
+    let valid = TxtRecord {
+        chunks: vec![vec![0; 255], vec![]],
+    };
+    record.add_record(DnsSection::Answer, "txt.test", DnsClass::IN, 0, &valid)?;
+    for chunks in [vec![], vec![vec![0; 256]]] {
+        assert!(
+            record
+                .rr_mut(DnsSection::Answer, 0)?
+                .set(&TxtRecord { chunks })
+                .is_err()
+        );
+        assert_eq!(record.rr(DnsSection::Answer, 0)?.as_txt()?, valid);
+    }
+    let parsed = DnsRecord::parse_wire(&record.write_wire()?)?;
+    assert_eq!(parsed.rr(DnsSection::Answer, 0)?.as_txt()?, valid);
     Ok(())
 }
 
@@ -263,6 +290,7 @@ fn options_preserve_raw_values_and_pointers_across_moves() -> Result<()> {
         .dns0x20(true)
         .primary(true)
         .rotate(true)
+        .servers([Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 0, 2, 53)])
         .search_domains(["one.test", "two.test"])
         .lookup_strategy(LookupStrategy::FilesThenDns)
         .resolvconf_path("/tmp/cares-c3-resolv.conf")
@@ -307,13 +335,17 @@ fn options_preserve_raw_values_and_pointers_across_moves() -> Result<()> {
         | sys::ARES_OPT_ROTATE
         | sys::ARES_OPT_MAXTIMEOUTMS
         | sys::ARES_OPT_QUERY_CACHE
-        | sys::ARES_OPT_SERVER_FAILOVER;
+        | sys::ARES_OPT_SERVER_FAILOVER
+        | sys::ARES_OPT_SERVERS;
     assert_eq!(mask, required);
     assert_eq!(mask & sys::ARES_OPT_EVENT_THREAD, 0);
     assert_eq!(raw.domains, original_domains);
     assert_eq!(raw.ndomains, 2);
+    assert_eq!(raw.nservers, 2);
     // SAFETY: moved retains all CString and pointer-array allocations; ndomains is two.
     unsafe {
+        assert_eq!((*raw.servers).s_addr.to_ne_bytes(), [127, 0, 0, 1]);
+        assert_eq!((*raw.servers.add(1)).s_addr.to_ne_bytes(), [192, 0, 2, 53]);
         assert_eq!(CStr::from_ptr(*raw.domains).to_bytes(), b"one.test");
         assert_eq!(CStr::from_ptr(*raw.domains.add(1)).to_bytes(), b"two.test");
         assert_eq!(CStr::from_ptr(raw.lookups).to_bytes(), b"fb");
@@ -497,7 +529,9 @@ fn success_with_null_record_is_an_error() {
     let state = Rc::new(CallbackState::new());
     let delivered = Rc::new(Cell::new(false));
     let capture = Rc::clone(&delivered);
-    let callback: DnsCallback = Box::new(move |result, _| capture.set(result.is_err()));
+    let callback: DnsCallback = Box::new(move |result, _| {
+        capture.set(matches!(result, Err(AresError::InvalidRecord(_))));
+    });
     let slot = CallbackSlot::new(Rc::clone(&state), callback);
     deliver_dns(&slot, sys::ARES_SUCCESS, None);
     assert!(delivered.get());
