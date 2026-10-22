@@ -33,6 +33,9 @@ pub type ares_dns_record_t = ares_dns_record;
 pub type ares_dns_rr_t = ares_dns_rr;
 pub type ares_dns_qd_t = ares_dns_qd;
 
+/// # Safety
+/// Implementations must preserve callback data validity, avoid unwinding, and
+/// treat socket readiness notifications as synchronous channel callbacks.
 pub type ares_sock_state_cb = Option<
     unsafe extern "C" fn(
         data: *mut c_void,
@@ -41,6 +44,9 @@ pub type ares_sock_state_cb = Option<
         writable: c_int,
     ),
 >;
+/// # Safety
+/// `abuf` is borrowed and read-only for `alen` bytes during the callback only.
+/// Implementations must preserve `arg` validity and never unwind through C.
 pub type ares_callback = Option<
     unsafe extern "C" fn(
         arg: *mut c_void,
@@ -50,6 +56,9 @@ pub type ares_callback = Option<
         alen: c_int,
     ),
 >;
+/// # Safety
+/// `dnsrec` may be null on failure; otherwise it is borrowed until callback
+/// return. Duplicate it to retain it. Never unwind or destroy the parent channel.
 pub type ares_callback_dnsrec = Option<
     unsafe extern "C" fn(
         arg: *mut c_void,
@@ -58,6 +67,9 @@ pub type ares_callback_dnsrec = Option<
         dnsrec: *const ares_dns_record_t,
     ),
 >;
+/// # Safety
+/// `hostent` may be null on failure; otherwise it is borrowed only until callback
+/// return and must not be freed. Preserve `arg` validity and never unwind.
 pub type ares_host_callback = Option<
     unsafe extern "C" fn(
         arg: *mut c_void,
@@ -66,6 +78,9 @@ pub type ares_host_callback = Option<
         hostent: *mut libc::hostent,
     ),
 >;
+/// # Safety
+/// Non-null `node` and `service` strings are read-only callback-scoped borrows.
+/// Preserve `arg` validity and never unwind through C.
 pub type ares_nameinfo_callback = Option<
     unsafe extern "C" fn(
         arg: *mut c_void,
@@ -75,6 +90,9 @@ pub type ares_nameinfo_callback = Option<
         service: *mut c_char,
     ),
 >;
+/// # Safety
+/// `server_string` is a read-only callback-scoped borrow. Preserve `data`
+/// validity and never unwind or destroy the channel from the callback.
 pub type ares_server_state_callback = Option<
     unsafe extern "C" fn(
         server_string: *const c_char,
@@ -83,9 +101,15 @@ pub type ares_server_state_callback = Option<
         data: *mut c_void,
     ),
 >;
+/// # Safety
+/// Use the supplied live socket only during the callback; preserve `data`
+/// validity and report errors via the C return value without unwinding.
 pub type ares_sock_create_callback = Option<
     unsafe extern "C" fn(socket_fd: ares_socket_t, r#type: c_int, data: *mut c_void) -> c_int,
 >;
+/// # Safety
+/// The socket/data lifetime and no-unwind contract is identical to
+/// [`ares_sock_create_callback`].
 pub type ares_sock_config_callback = ares_sock_create_callback;
 
 #[repr(C)]
@@ -97,6 +121,8 @@ pub struct ares_server_failover_options {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+/// Initialize all fields selected by the option mask. Pointer/count pairs must
+/// describe valid memory; callback data must outlive channel registration.
 pub struct ares_options {
     pub flags: c_int,
     pub timeout: c_int,
