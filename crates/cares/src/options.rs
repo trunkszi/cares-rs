@@ -448,6 +448,7 @@ impl ResolverBuilder {
     /// Sets failed-server retry probability (1/N) and delay in milliseconds.
     ///
     /// A zero retry chance disables retries; zero delay allows immediate retry.
+    /// [`Self::build`] rejects delays above `i64::MAX` milliseconds.
     ///
     /// # Panics
     /// This function has no explicit panic paths.
@@ -606,9 +607,15 @@ impl ResolverBuilder {
                     "server failover requires a whole-millisecond delay",
                 ));
             }
+            let delay_ms = delay.as_millis();
+            // c-ares casts milliseconds to signed 64-bit before calculating deadlines.
+            if delay_ms > i64::MAX as u128 {
+                return Err(AresError::invalid_input(
+                    "server failover delay exceeds signed 64-bit milliseconds",
+                ));
+            }
             raw.server_failover_opts.retry_chance = chance;
-            raw.server_failover_opts.retry_delay = delay
-                .as_millis()
+            raw.server_failover_opts.retry_delay = delay_ms
                 .try_into()
                 .map_err(|_| AresError::invalid_input("server failover delay exceeds size_t"))?;
             *mask |= cares_sys::ARES_OPT_SERVER_FAILOVER;
@@ -673,6 +680,31 @@ fn string_pointer(value: &Option<CString>) -> *mut libc::c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_scenario_failover_delay_respects_signed_time_boundary() -> Result<()> {
+        let maximum = i64::MAX as u64;
+        for chance in [0, 1] {
+            let options = ResolverBuilder::new()
+                .server_failover(chance, Duration::from_millis(maximum))
+                .build()?;
+            assert_eq!(
+                options.raw_options().server_failover_opts.retry_delay,
+                maximum as usize
+            );
+            assert_eq!(
+                options.raw_options().server_failover_opts.retry_chance,
+                chance
+            );
+            assert!(matches!(
+                ResolverBuilder::new()
+                    .server_failover(chance, Duration::from_millis(maximum + 1))
+                    .build(),
+                Err(AresError::InvalidInput(_))
+            ));
+        }
+        Ok(())
+    }
 
     #[test]
     fn channel_copies_servers_domains_and_lookups_before_options_drop() -> Result<()> {

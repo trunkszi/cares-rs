@@ -96,7 +96,8 @@ impl<'a> DnsRr<'a> {
         // SAFETY: self borrows a live resource record.
         DnsRecordType::try_from(unsafe { sys::ares_dns_rr_get_type(self.as_ptr()) }.0)
     }
-    /// Read the resource-record class or EDNS0 UDP payload size.
+    /// Read the resource-record class. Parsed OPT records report [`DnsClass::IN`];
+    /// read their EDNS0 UDP payload size through [`Self::as_opt`].
     ///
     /// # Errors
     /// Returns an error if the class cannot be represented.
