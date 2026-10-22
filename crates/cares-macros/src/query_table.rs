@@ -284,6 +284,12 @@ fn emit(visibility: Visibility, name: Ident, slots: &[CheckedSlot]) -> TokenStre
     let types = slots.iter().map(|slot| slot.rr_type).collect::<Vec<_>>();
     let classes = slots.iter().map(|slot| slot.class).collect::<Vec<_>>();
     let count = slots.len();
+    let dispatch_alias = (!slots.iter().any(|slot| slot.variant == "DISPATCH")).then(|| {
+        quote! {
+            /// Query slots in declaration order; also available through `Self::dispatch()`.
+            pub const DISPATCH: [#dispatch; #count] = Self::__CARES_QUERY_TABLE_DISPATCH;
+        }
+    });
     quote! {
         /// A statically validated DNS question route.
         #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -307,10 +313,16 @@ fn emit(visibility: Visibility, name: Ident, slots: &[CheckedSlot]) -> TokenStre
         impl #name {
             /// Number of statically declared query slots.
             pub const SLOT_COUNT: ::core::primitive::usize = #count;
-            /// Query slots in declaration order.
-            pub const DISPATCH: [#dispatch; #count] = [#(
+            const __CARES_QUERY_TABLE_DISPATCH: [#dispatch; #count] = [#(
                 #dispatch { name: #names, qname: #domains, rr_type: #types, dns_class: #classes },
             )*];
+
+            #dispatch_alias
+
+            /// Returns query slots in declaration order.
+            pub const fn dispatch() -> &'static [#dispatch; #count] {
+                &Self::__CARES_QUERY_TABLE_DISPATCH
+            }
 
             /// Returns the declared slot identifier.
             pub const fn slot_name(self) -> &'static ::core::primitive::str {
