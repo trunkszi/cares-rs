@@ -723,14 +723,16 @@ fn io_uring_proactor_drives_resolver_against_mock() -> TestResult {
     };
     let server =
         MockDnsServer::start(Zone::new().a("proactor.test.", Ipv4Addr::new(192, 0, 2, 200)))?;
-    server.set_behavior(Behavior::Delay(Duration::from_millis(10)));
+    // TC=1 forces a TCP fallback, so the bridge sees the UDP descriptor first
+    // and then a second descriptor while the first is still registered.
+    server.set_behavior(Behavior::TruncateUdp);
     let dns_id = liburing::id::SubsystemId::new(1).ok_or_else(|| failure("dns subsystem id"))?;
     let nop_id = liburing::id::SubsystemId::new(2).ok_or_else(|| failure("nop subsystem id"))?;
     let mut driver = ProactorResolver::new(
         dns_id,
         fast_options(1, Duration::from_secs(2))?,
-        &server.servers_csv(),
-        8,
+        &server.servers_csv_with_tcp(),
+        1,
     )?;
     let result: ProactorResult = Rc::new(RefCell::new(None));
     let result_sink = Rc::clone(&result);
@@ -778,15 +780,13 @@ fn io_uring_proactor_drives_resolver_against_mock() -> TestResult {
         .take()
         .ok_or_else(|| failure("real proactor did not complete the DNS query"))?;
     assert_eq!(status, AresStatus::Success);
-    assert_eq!(
-        record?.rr(DnsSection::Answer, 0)?.as_a()?.address,
-        Ipv4Addr::new(192, 0, 2, 200)
-    );
+    let answer = record?.rr(DnsSection::Answer, 0)?.as_a()?.address;
+    assert_eq!(answer, Ipv4Addr::new(192, 0, 2, 200));
     assert!(
-        nop_seen.get() >= 2,
-        "expected the NOP and its timer completion, saw {}",
-        nop_seen.get()
+        server.udp_queries() >= 1 && server.tcp_queries() >= 1,
+        "the capacity-1 bridge did not grow across the UDP and TCP descriptors"
     );
+    assert!(nop_seen.get() >= 2, "saw {} completions", nop_seen.get());
     proactor.shutdown()?;
     drop(proactor);
     drop(timer);

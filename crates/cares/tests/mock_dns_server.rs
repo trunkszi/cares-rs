@@ -424,7 +424,7 @@ fn add_answer(record: *mut ares_dns_record_t, answer: &Answer) -> io::Result<()>
 }
 
 #[rustfmt::skip]
-fn make_response(zone: &Zone, request: &[u8], truncate: bool, forced_rcode: Option<ares_dns_rcode_t>)
+pub(crate) fn make_response(zone: &Zone, request: &[u8], truncate: bool, forced_rcode: Option<ares_dns_rcode_t>)
     -> io::Result<Option<Vec<u8>>> {
     let Some(request) = parse_request(request) else { return Ok(None) };
     let (rcode, answers) = match forced_rcode {

@@ -21,6 +21,7 @@ use cares_sys as sys;
 pub mod callbacks;
 pub mod error;
 pub mod options;
+pub mod proactor;
 pub mod record;
 pub mod record_rr;
 pub mod resolver;
@@ -31,6 +32,7 @@ pub mod types;
 pub use cares_macros::*;
 pub use error::{AresError, AresStatus, Result};
 pub use options::{ResolverBuilder, ResolverOptions};
+pub use proactor::ProactorResolver;
 pub use record::{DnsRecord, DnsRecordRef};
 pub use record_rr::{
     ARecord, AaaaRecord, CaaRecord, CnameRecord, HttpsRecord, MxRecord, NaptrRecord, NsRecord,
@@ -586,7 +588,7 @@ mod support {
                     }
                 })?
         };
-        if host.is_poisoned() {
+        if host.is_poisoned() || host.sockets.readiness_sink_failed() {
             return Err(AresError::CallbackPanicked);
         }
         let completed = host
@@ -651,150 +653,3 @@ mod support {
         }
     }
 }
-
-mod proactor_support {
-    use std::{cell::RefCell, collections::VecDeque, os::fd::RawFd, rc::Rc};
-
-    use liburing::{
-        Proactor, SubmissionContext, UringError,
-        id::{OpId, OpPayload, SubsystemId},
-        socket_bridge::{
-            BridgeError, BridgeSubmission, SocketInterest as UringInterest, UringSocketBridge,
-            UringSocketOps,
-        },
-    };
-
-    use crate::{
-        error::{AresError, Result},
-        options::ResolverOptions,
-        resolver::Resolver,
-        socket_bridge::{ReadinessSink, SocketInterest},
-    };
-
-    pub(crate) type Queue = Rc<RefCell<VecDeque<(OpId, BridgeSubmission<OpId>)>>>;
-    pub(crate) struct Ops {
-        pub(crate) id: SubsystemId,
-        pub(crate) queue: Queue,
-    }
-
-    impl UringSocketOps for Ops {
-        type OpId = OpId;
-        type Error = UringError;
-
-        fn subsystem_id(&self) -> SubsystemId {
-            self.id
-        }
-
-        fn submit(
-            &mut self,
-            token: u64,
-            submission: BridgeSubmission<OpId>,
-        ) -> liburing::Result<OpId> {
-            let id = OpId::pack(
-                self.id,
-                OpPayload::new(token).ok_or(UringError::PayloadOverflow(token))?,
-            );
-            self.queue.borrow_mut().push_back((id, submission));
-            Ok(id)
-        }
-    }
-    pub(crate) struct Sink {
-        pub(crate) bridge: Rc<RefCell<UringSocketBridge<Ops>>>,
-    }
-
-    impl ReadinessSink for Sink {
-        fn update_interest(&self, fd: i32, interest: SocketInterest) {
-            let mut bridge = self.bridge.borrow_mut();
-            let registered = bridge.register(fd as RawFd).or_else(|error| match error {
-                BridgeError::AlreadyRegistered => Ok(()),
-                other => Err(other),
-            });
-            if registered.is_ok() {
-                let mut mask = UringInterest::EMPTY;
-                if interest.readable {
-                    mask |= UringInterest::READABLE;
-                }
-                if interest.writable {
-                    mask |= UringInterest::WRITABLE;
-                }
-                drop(bridge.set_interest(fd as RawFd, mask));
-            }
-        }
-
-        fn remove_interest(&self, fd: i32) {
-            let mut bridge = self.bridge.borrow_mut();
-            drop(bridge.set_interest(fd as RawFd, UringInterest::EMPTY));
-        }
-    }
-    pub struct ProactorResolver {
-        pub resolver: Resolver,
-        pub(crate) bridge: Rc<RefCell<UringSocketBridge<Ops>>>,
-        pub(crate) queue: Queue,
-    }
-
-    impl ProactorResolver {
-        /// Creates a driver for one non-internal proactor subsystem.
-        ///
-        /// # Errors
-        /// Returns a resolver, proactor, or socket-bridge construction error.
-        pub fn new(
-            subsystem: SubsystemId,
-            options: ResolverOptions,
-            servers_csv: &str,
-            capacity: usize,
-        ) -> Result<Self> {
-            let queue: Queue = Rc::new(RefCell::new(VecDeque::new()));
-            let bridge = UringSocketBridge::new(
-                subsystem,
-                Ops {
-                    id: subsystem,
-                    queue: Rc::clone(&queue),
-                },
-                capacity,
-            )
-            .map_err(|error| AresError::invalid_input(format!("socket bridge: {error}")))?;
-            let bridge = Rc::new(RefCell::new(bridge));
-            let mut resolver = Resolver::new(options)?;
-            resolver.set_servers_csv(servers_csv)?;
-            resolver.install_readiness_sink(Rc::new(Sink {
-                bridge: Rc::clone(&bridge),
-            }))?;
-            Ok(Self {
-                resolver,
-                bridge,
-                queue,
-            })
-        }
-
-        /// Stages the socket registrations produced before registration.
-        ///
-        /// # Errors
-        /// Returns a proactor submission error.
-        pub fn flush(&mut self, proactor: &mut Proactor) -> Result<()> {
-            while let Some((id, submission)) = self.queue.borrow_mut().pop_front() {
-                proactor
-                    .prepare_sqe_with(id, |sqe| {
-                        // SAFETY: The submission owns no DMA; the bridge owns the descriptor.
-                        unsafe { crate::resolver::prepare_bridge_sqe(sqe, submission) }
-                    })
-                    .map_err(|error| AresError::invalid_input(format!("proactor: {error}")))?;
-            }
-            Ok(())
-        }
-
-        pub(crate) fn flush_into(
-            &mut self,
-            submissions: &mut SubmissionContext<'_>,
-        ) -> liburing::Result<()> {
-            while let Some((id, submission)) = self.queue.borrow_mut().pop_front() {
-                // SAFETY: The submission owns no DMA; the bridge owns descriptor lifetime.
-                submissions.prepare_sqe_with(id, |sqe| {
-                    // SAFETY: The submission owns no DMA; the bridge owns the descriptor.
-                    unsafe { crate::resolver::prepare_bridge_sqe(sqe, submission) }
-                })?;
-            }
-            Ok(())
-        }
-    }
-}
-pub use proactor_support::ProactorResolver;

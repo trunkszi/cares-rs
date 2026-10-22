@@ -629,7 +629,7 @@ impl Resolver {
                 advanced = true;
             }
         }
-        if self.is_poisoned() {
+        if self.is_poisoned() || self.sockets.readiness_sink_failed() {
             return Err(AresError::CallbackPanicked);
         }
         let _deadline = self.timer.refresh(channel);
@@ -763,35 +763,5 @@ pub(crate) unsafe fn prepare_bridge_sqe(
         // SAFETY: The caller guarantees exclusive initialized SQE storage.
         BridgeSubmission::Close { fd } => unsafe { liburing::ops::net::prep_close(sqe, fd) },
         BridgeSubmission::Connect { .. } => {}
-    }
-}
-
-impl liburing::SubsystemHandler for crate::ProactorResolver {
-    fn on_completion(
-        &mut self,
-        completion: liburing::Completion,
-        submissions: &mut liburing::SubmissionContext<'_>,
-    ) -> liburing::Result<()> {
-        let event = self.bridge.borrow_mut().on_completion(completion);
-        if let Some(event) = event
-            && !event.interest.is_empty()
-        {
-            use liburing::socket_bridge::SocketInterest;
-            let cqe = ResolverCqe::Socket {
-                fd: event.fd,
-                readable: event.interest.contains(SocketInterest::READABLE),
-                writable: event.interest.contains(SocketInterest::WRITABLE),
-            };
-            if self.resolver.on_cqe(cqe).is_err() {
-                return Err(liburing::UringError::InvalidConfig(
-                    "resolver completion failed",
-                ));
-            }
-        }
-        self.bridge
-            .borrow_mut()
-            .drive()
-            .map_err(|_| liburing::UringError::InvalidConfig("socket bridge drive failed"))?;
-        self.flush_into(submissions)
     }
 }
