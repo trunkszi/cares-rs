@@ -1,0 +1,420 @@
+//! C enum values represented as open integer domains.
+//!
+//! DNS wire values can be outside the named C enumerators. In particular, raw
+//! resource records preserve arbitrary wire class values. Transparent integer
+//! wrappers allow these values to cross FFI without invalid Rust discriminants.
+
+use libc::c_uint;
+
+macro_rules! c_enum {
+    ($(#[$meta:meta])* $name:ident { $($key:ident = $value:expr,)* }) => {
+        $(#[$meta])*
+        #[repr(transparent)]
+        #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+        pub struct $name(pub c_uint);
+
+        impl $name {
+            $(pub const $key: Self = Self($value);)*
+        }
+        $(pub const $key: $name = $name::$key;)*
+
+        impl From<c_uint> for $name {
+            fn from(value: c_uint) -> Self { Self(value) }
+        }
+        impl From<$name> for c_uint {
+            fn from(value: $name) -> Self { value.0 }
+        }
+    };
+}
+
+c_enum! { ares_status_t {
+    ARES_SUCCESS = 0,
+    ARES_ENODATA = 1,
+    ARES_EFORMERR = 2,
+    ARES_ESERVFAIL = 3,
+    ARES_ENOTFOUND = 4,
+    ARES_ENOTIMP = 5,
+    ARES_EREFUSED = 6,
+    ARES_EBADQUERY = 7,
+    ARES_EBADNAME = 8,
+    ARES_EBADFAMILY = 9,
+    ARES_EBADRESP = 10,
+    ARES_ECONNREFUSED = 11,
+    ARES_ETIMEOUT = 12,
+    ARES_EOF = 13,
+    ARES_EFILE = 14,
+    ARES_ENOMEM = 15,
+    ARES_EDESTRUCTION = 16,
+    ARES_EBADSTR = 17,
+    ARES_EBADFLAGS = 18,
+    ARES_ENONAME = 19,
+    ARES_EBADHINTS = 20,
+    ARES_ENOTINITIALIZED = 21,
+    ARES_ELOADIPHLPAPI = 22,
+    ARES_EADDRGETNETWORKPARAMS = 23,
+    ARES_ECANCELLED = 24,
+    ARES_ESERVICE = 25,
+    ARES_ENOSERVER = 26,
+} }
+
+c_enum! { ares_bool_t {
+    ARES_FALSE = 0,
+    ARES_TRUE = 1,
+} }
+
+c_enum! { ares_evsys_t {
+    ARES_EVSYS_DEFAULT = 0,
+    ARES_EVSYS_WIN32 = 1,
+    ARES_EVSYS_EPOLL = 2,
+    ARES_EVSYS_KQUEUE = 3,
+    ARES_EVSYS_POLL = 4,
+    ARES_EVSYS_SELECT = 5,
+} }
+
+c_enum! { ares_sockfunc_flags_t {
+    ARES_SOCKFUNC_FLAG_NONBLOCKING = 1,
+} }
+
+c_enum! { ares_socket_opt_t {
+    ARES_SOCKET_OPT_SENDBUF_SIZE = 0,
+    ARES_SOCKET_OPT_RECVBUF_SIZE = 1,
+    ARES_SOCKET_OPT_BIND_DEVICE = 2,
+    ARES_SOCKET_OPT_TCP_FASTOPEN = 3,
+} }
+
+c_enum! { ares_socket_connect_flags_t {
+    ARES_SOCKET_CONN_TCP_FASTOPEN = 1,
+} }
+
+c_enum! { ares_socket_bind_flags_t {
+    ARES_SOCKET_BIND_TCP = 1,
+    ARES_SOCKET_BIND_CLIENT = 2,
+} }
+
+c_enum! { ares_fd_eventflag_t {
+    ARES_FD_EVENT_NONE = 0,
+    ARES_FD_EVENT_READ = 1,
+    ARES_FD_EVENT_WRITE = 2,
+} }
+
+c_enum! { ares_process_flag_t {
+    ARES_PROCESS_FLAG_NONE = 0,
+    ARES_PROCESS_FLAG_SKIP_NON_FD = 1,
+} }
+
+c_enum! { ares_dns_rec_type_t {
+    ARES_REC_TYPE_A = 1,
+    ARES_REC_TYPE_NS = 2,
+    ARES_REC_TYPE_CNAME = 5,
+    ARES_REC_TYPE_SOA = 6,
+    ARES_REC_TYPE_PTR = 12,
+    ARES_REC_TYPE_HINFO = 13,
+    ARES_REC_TYPE_MX = 15,
+    ARES_REC_TYPE_TXT = 16,
+    ARES_REC_TYPE_SIG = 24,
+    ARES_REC_TYPE_AAAA = 28,
+    ARES_REC_TYPE_SRV = 33,
+    ARES_REC_TYPE_NAPTR = 35,
+    ARES_REC_TYPE_OPT = 41,
+    ARES_REC_TYPE_DS = 43,
+    ARES_REC_TYPE_SSHFP = 44,
+    ARES_REC_TYPE_RRSIG = 46,
+    ARES_REC_TYPE_NSEC = 47,
+    ARES_REC_TYPE_DNSKEY = 48,
+    ARES_REC_TYPE_NSEC3 = 50,
+    ARES_REC_TYPE_NSEC3PARAM = 51,
+    ARES_REC_TYPE_TLSA = 52,
+    ARES_REC_TYPE_SVCB = 64,
+    ARES_REC_TYPE_HTTPS = 65,
+    ARES_REC_TYPE_ANY = 255,
+    ARES_REC_TYPE_URI = 256,
+    ARES_REC_TYPE_CAA = 257,
+    ARES_REC_TYPE_RAW_RR = 65536,
+} }
+
+c_enum! { ares_dns_class_t {
+    ARES_CLASS_IN = 1,
+    ARES_CLASS_CHAOS = 3,
+    ARES_CLASS_HESIOD = 4,
+    ARES_CLASS_HESOID = 4,
+    ARES_CLASS_NONE = 254,
+    ARES_CLASS_ANY = 255,
+} }
+
+c_enum! { ares_dns_section_t {
+    ARES_SECTION_ANSWER = 1,
+    ARES_SECTION_AUTHORITY = 2,
+    ARES_SECTION_ADDITIONAL = 3,
+} }
+
+c_enum! { ares_dns_opcode_t {
+    ARES_OPCODE_QUERY = 0,
+    ARES_OPCODE_IQUERY = 1,
+    ARES_OPCODE_STATUS = 2,
+    ARES_OPCODE_NOTIFY = 4,
+    ARES_OPCODE_UPDATE = 5,
+} }
+
+c_enum! { ares_dns_flags_t {
+    ARES_FLAG_QR = 1,
+    ARES_FLAG_AA = 2,
+    ARES_FLAG_TC = 4,
+    ARES_FLAG_RD = 8,
+    ARES_FLAG_RA = 16,
+    ARES_FLAG_AD = 32,
+    ARES_FLAG_CD = 64,
+} }
+
+c_enum! { ares_dns_rcode_t {
+    ARES_RCODE_NOERROR = 0,
+    ARES_RCODE_FORMERR = 1,
+    ARES_RCODE_SERVFAIL = 2,
+    ARES_RCODE_NXDOMAIN = 3,
+    ARES_RCODE_NOTIMP = 4,
+    ARES_RCODE_REFUSED = 5,
+    ARES_RCODE_YXDOMAIN = 6,
+    ARES_RCODE_YXRRSET = 7,
+    ARES_RCODE_NXRRSET = 8,
+    ARES_RCODE_NOTAUTH = 9,
+    ARES_RCODE_NOTZONE = 10,
+    ARES_RCODE_DSOTYPEI = 11,
+    ARES_RCODE_BADSIG = 16,
+    ARES_RCODE_BADKEY = 17,
+    ARES_RCODE_BADTIME = 18,
+    ARES_RCODE_BADMODE = 19,
+    ARES_RCODE_BADNAME = 20,
+    ARES_RCODE_BADALG = 21,
+    ARES_RCODE_BADTRUNC = 22,
+    ARES_RCODE_BADCOOKIE = 23,
+} }
+
+c_enum! { ares_dns_datatype_t {
+    ARES_DATATYPE_INADDR = 1,
+    ARES_DATATYPE_INADDR6 = 2,
+    ARES_DATATYPE_U8 = 3,
+    ARES_DATATYPE_U16 = 4,
+    ARES_DATATYPE_U32 = 5,
+    ARES_DATATYPE_NAME = 6,
+    ARES_DATATYPE_STR = 7,
+    ARES_DATATYPE_BIN = 8,
+    ARES_DATATYPE_BINP = 9,
+    ARES_DATATYPE_OPT = 10,
+    ARES_DATATYPE_ABINP = 11,
+} }
+
+c_enum! { ares_dns_rr_key_t {
+    ARES_RR_A_ADDR = 101,
+    ARES_RR_NS_NSDNAME = 201,
+    ARES_RR_CNAME_CNAME = 501,
+    ARES_RR_SOA_MNAME = 601,
+    ARES_RR_SOA_RNAME = 602,
+    ARES_RR_SOA_SERIAL = 603,
+    ARES_RR_SOA_REFRESH = 604,
+    ARES_RR_SOA_RETRY = 605,
+    ARES_RR_SOA_EXPIRE = 606,
+    ARES_RR_SOA_MINIMUM = 607,
+    ARES_RR_PTR_DNAME = 1201,
+    ARES_RR_HINFO_CPU = 1301,
+    ARES_RR_HINFO_OS = 1302,
+    ARES_RR_MX_PREFERENCE = 1501,
+    ARES_RR_MX_EXCHANGE = 1502,
+    ARES_RR_TXT_DATA = 1601,
+    ARES_RR_SIG_TYPE_COVERED = 2401,
+    ARES_RR_SIG_ALGORITHM = 2402,
+    ARES_RR_SIG_LABELS = 2403,
+    ARES_RR_SIG_ORIGINAL_TTL = 2404,
+    ARES_RR_SIG_EXPIRATION = 2405,
+    ARES_RR_SIG_INCEPTION = 2406,
+    ARES_RR_SIG_KEY_TAG = 2407,
+    ARES_RR_SIG_SIGNERS_NAME = 2408,
+    ARES_RR_SIG_SIGNATURE = 2409,
+    ARES_RR_AAAA_ADDR = 2801,
+    ARES_RR_SRV_PRIORITY = 3302,
+    ARES_RR_SRV_WEIGHT = 3303,
+    ARES_RR_SRV_PORT = 3304,
+    ARES_RR_SRV_TARGET = 3305,
+    ARES_RR_NAPTR_ORDER = 3501,
+    ARES_RR_NAPTR_PREFERENCE = 3502,
+    ARES_RR_NAPTR_FLAGS = 3503,
+    ARES_RR_NAPTR_SERVICES = 3504,
+    ARES_RR_NAPTR_REGEXP = 3505,
+    ARES_RR_NAPTR_REPLACEMENT = 3506,
+    ARES_RR_OPT_UDP_SIZE = 4101,
+    ARES_RR_OPT_VERSION = 4103,
+    ARES_RR_OPT_FLAGS = 4104,
+    ARES_RR_OPT_OPTIONS = 4105,
+    ARES_RR_DS_KEY_TAG = 4301,
+    ARES_RR_DS_ALGORITHM = 4302,
+    ARES_RR_DS_DIGEST_TYPE = 4303,
+    ARES_RR_DS_DIGEST = 4304,
+    ARES_RR_SSHFP_ALGORITHM = 4401,
+    ARES_RR_SSHFP_FP_TYPE = 4402,
+    ARES_RR_SSHFP_FINGERPRINT = 4403,
+    ARES_RR_RRSIG_TYPE_COVERED = 4601,
+    ARES_RR_RRSIG_ALGORITHM = 4602,
+    ARES_RR_RRSIG_LABELS = 4603,
+    ARES_RR_RRSIG_ORIGINAL_TTL = 4604,
+    ARES_RR_RRSIG_EXPIRATION = 4605,
+    ARES_RR_RRSIG_INCEPTION = 4606,
+    ARES_RR_RRSIG_KEY_TAG = 4607,
+    ARES_RR_RRSIG_SIGNERS_NAME = 4608,
+    ARES_RR_RRSIG_SIGNATURE = 4609,
+    ARES_RR_NSEC_NEXT_DOMAIN = 4701,
+    ARES_RR_NSEC_TYPE_BIT_MAPS = 4702,
+    ARES_RR_DNSKEY_FLAGS = 4801,
+    ARES_RR_DNSKEY_PROTOCOL = 4802,
+    ARES_RR_DNSKEY_ALGORITHM = 4803,
+    ARES_RR_DNSKEY_PUBLIC_KEY = 4804,
+    ARES_RR_NSEC3_HASH_ALGORITHM = 5001,
+    ARES_RR_NSEC3_FLAGS = 5002,
+    ARES_RR_NSEC3_ITERATIONS = 5003,
+    ARES_RR_NSEC3_SALT = 5004,
+    ARES_RR_NSEC3_NEXT_HASHED_OWNER = 5005,
+    ARES_RR_NSEC3_TYPE_BIT_MAPS = 5006,
+    ARES_RR_NSEC3PARAM_HASH_ALGORITHM = 5101,
+    ARES_RR_NSEC3PARAM_FLAGS = 5102,
+    ARES_RR_NSEC3PARAM_ITERATIONS = 5103,
+    ARES_RR_NSEC3PARAM_SALT = 5104,
+    ARES_RR_TLSA_CERT_USAGE = 5201,
+    ARES_RR_TLSA_SELECTOR = 5202,
+    ARES_RR_TLSA_MATCH = 5203,
+    ARES_RR_TLSA_DATA = 5204,
+    ARES_RR_SVCB_PRIORITY = 6401,
+    ARES_RR_SVCB_TARGET = 6402,
+    ARES_RR_SVCB_PARAMS = 6403,
+    ARES_RR_HTTPS_PRIORITY = 6501,
+    ARES_RR_HTTPS_TARGET = 6502,
+    ARES_RR_HTTPS_PARAMS = 6503,
+    ARES_RR_URI_PRIORITY = 25601,
+    ARES_RR_URI_WEIGHT = 25602,
+    ARES_RR_URI_TARGET = 25603,
+    ARES_RR_CAA_CRITICAL = 25701,
+    ARES_RR_CAA_TAG = 25702,
+    ARES_RR_CAA_VALUE = 25703,
+    ARES_RR_RAW_RR_TYPE = 6553601,
+    ARES_RR_RAW_RR_DATA = 6553602,
+} }
+
+c_enum! { ares_tlsa_usage_t {
+    ARES_TLSA_USAGE_CA = 0,
+    ARES_TLSA_USAGE_SERVICE = 1,
+    ARES_TLSA_USAGE_TRUSTANCHOR = 2,
+    ARES_TLSA_USAGE_DOMAIN = 3,
+} }
+
+c_enum! { ares_tlsa_selector_t {
+    ARES_TLSA_SELECTOR_FULL = 0,
+    ARES_TLSA_SELECTOR_SUBJPUBKEYINFO = 1,
+} }
+
+c_enum! { ares_tlsa_match_t {
+    ARES_TLSA_MATCH_EXACT = 0,
+    ARES_TLSA_MATCH_SHA256 = 1,
+    ARES_TLSA_MATCH_SHA512 = 2,
+} }
+
+c_enum! { ares_sshfp_algorithm_t {
+    ARES_SSHFP_ALGORITHM_RSA = 1,
+    ARES_SSHFP_ALGORITHM_DSA = 2,
+    ARES_SSHFP_ALGORITHM_ECDSA = 3,
+    ARES_SSHFP_ALGORITHM_ED25519 = 4,
+    ARES_SSHFP_ALGORITHM_ED448 = 6,
+} }
+
+c_enum! { ares_sshfp_fp_type_t {
+    ARES_SSHFP_FP_SHA1 = 1,
+    ARES_SSHFP_FP_SHA256 = 2,
+} }
+
+c_enum! { ares_dnssec_algorithm_t {
+    ARES_DNSSEC_ALGORITHM_RSAMD5 = 1,
+    ARES_DNSSEC_ALGORITHM_DH = 2,
+    ARES_DNSSEC_ALGORITHM_DSA = 3,
+    ARES_DNSSEC_ALGORITHM_RSASHA1 = 5,
+    ARES_DNSSEC_ALGORITHM_DSA_NSEC3_SHA1 = 6,
+    ARES_DNSSEC_ALGORITHM_RSASHA1_NSEC3_SHA1 = 7,
+    ARES_DNSSEC_ALGORITHM_RSASHA256 = 8,
+    ARES_DNSSEC_ALGORITHM_RSASHA512 = 10,
+    ARES_DNSSEC_ALGORITHM_ECC_GOST = 12,
+    ARES_DNSSEC_ALGORITHM_ECDSAP256SHA256 = 13,
+    ARES_DNSSEC_ALGORITHM_ECDSAP384SHA384 = 14,
+    ARES_DNSSEC_ALGORITHM_ED25519 = 15,
+    ARES_DNSSEC_ALGORITHM_ED448 = 16,
+    ARES_DNSSEC_ALGORITHM_INDIRECT = 252,
+    ARES_DNSSEC_ALGORITHM_PRIVATEDNS = 253,
+    ARES_DNSSEC_ALGORITHM_PRIVATEOID = 254,
+} }
+
+c_enum! { ares_ds_digest_t {
+    ARES_DS_DIGEST_SHA1 = 1,
+    ARES_DS_DIGEST_SHA256 = 2,
+    ARES_DS_DIGEST_GOST = 3,
+    ARES_DS_DIGEST_SHA384 = 4,
+} }
+
+c_enum! { ares_nsec3_hash_t {
+    ARES_NSEC3_HASH_SHA1 = 1,
+} }
+
+c_enum! { ares_svcb_param_t {
+    ARES_SVCB_PARAM_MANDATORY = 0,
+    ARES_SVCB_PARAM_ALPN = 1,
+    ARES_SVCB_PARAM_NO_DEFAULT_ALPN = 2,
+    ARES_SVCB_PARAM_PORT = 3,
+    ARES_SVCB_PARAM_IPV4HINT = 4,
+    ARES_SVCB_PARAM_ECH = 5,
+    ARES_SVCB_PARAM_IPV6HINT = 6,
+    ARES_SVCB_PARAM_DOHPATH = 7,
+    ARES_SVCB_PARAM_OHTTP = 8,
+} }
+
+c_enum! { ares_opt_param_t {
+    ARES_OPT_PARAM_LLQ = 1,
+    ARES_OPT_PARAM_UL = 2,
+    ARES_OPT_PARAM_NSID = 3,
+    ARES_OPT_PARAM_DAU = 5,
+    ARES_OPT_PARAM_DHU = 6,
+    ARES_OPT_PARAM_N3U = 7,
+    ARES_OPT_PARAM_EDNS_CLIENT_SUBNET = 8,
+    ARES_OPT_PARAM_EDNS_EXPIRE = 9,
+    ARES_OPT_PARAM_COOKIE = 10,
+    ARES_OPT_PARAM_EDNS_TCP_KEEPALIVE = 11,
+    ARES_OPT_PARAM_PADDING = 12,
+    ARES_OPT_PARAM_CHAIN = 13,
+    ARES_OPT_PARAM_EDNS_KEY_TAG = 14,
+    ARES_OPT_PARAM_EXTENDED_DNS_ERROR = 15,
+} }
+
+c_enum! { ares_dns_opt_datatype_t {
+    ARES_OPT_DATATYPE_NONE = 1,
+    ARES_OPT_DATATYPE_STR_LIST = 2,
+    ARES_OPT_DATATYPE_U8_LIST = 3,
+    ARES_OPT_DATATYPE_U16 = 4,
+    ARES_OPT_DATATYPE_U16_LIST = 5,
+    ARES_OPT_DATATYPE_U32 = 6,
+    ARES_OPT_DATATYPE_U32_LIST = 7,
+    ARES_OPT_DATATYPE_INADDR4_LIST = 8,
+    ARES_OPT_DATATYPE_INADDR6_LIST = 9,
+    ARES_OPT_DATATYPE_BIN = 10,
+    ARES_OPT_DATATYPE_NAME = 11,
+    ARES_OPT_DATATYPE_UTF8_STR = 12,
+} }
+
+c_enum! { ares_dns_parse_flags_t {
+    ARES_DNS_PARSE_AN_BASE_RAW = 1,
+    ARES_DNS_PARSE_NS_BASE_RAW = 2,
+    ARES_DNS_PARSE_AR_BASE_RAW = 4,
+    ARES_DNS_PARSE_AN_EXT_RAW = 8,
+    ARES_DNS_PARSE_NS_EXT_RAW = 16,
+    ARES_DNS_PARSE_AR_EXT_RAW = 32,
+} }
+
+c_enum! {
+/// Local socket creation policy flags, not an upstream c-ares enum.
+///
+/// Both supported upstream versions require nonblocking sockets through the
+/// `asocket` contract, rather than passing creation flags to that callback.
+ares_socket_Create_flags_t {
+    ARES_SOCKET_OPT_NONBLOCK = 1,
+    ARES_SOCKET_OPT_CLOEXEC = 2,
+} }

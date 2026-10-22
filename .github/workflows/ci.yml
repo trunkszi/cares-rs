@@ -1,0 +1,73 @@
+name: cares-rs CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.png'
+  pull_request:
+    paths-ignore:
+      - '**.png'
+  workflow_dispatch:
+  schedule:
+    - cron: '37 3 * * 1'
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  RUST_TEST_THREADS: "1"
+
+jobs:
+  ci:
+    name: Incremental checks and threadless native builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Check runner isolation
+        run: bash .github/scripts/check-runner-isolation.sh
+
+      - name: Check system dependencies
+        shell: bash
+        run: |
+          for tool in cc c++ cmake make git python3 flock; do
+            if ! command -v "$tool" >/dev/null; then
+              echo "::error::missing required build tool: $tool"
+              exit 1
+            fi
+          done
+
+      - name: Put Rust on PATH
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install pinned Rust toolchain
+        run: bash .github/scripts/install-rust-toolchain.sh
+
+      - name: Resolve diff base
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          base=""
+          for candidate in "${PR_BASE_SHA:-}" "${PUSH_BEFORE_SHA:-}" HEAD~1 HEAD; do
+            if [ -n "$candidate" ] && git cat-file -e "$candidate^{commit}" 2>/dev/null; then
+              base="$(git rev-parse "$candidate^{commit}")"
+              break
+            fi
+          done
+          echo "BASE_SHA=$base" >> "$GITHUB_ENV"
+
+      - name: Run incremental CI
+        run: bash .github/scripts/ci-incremental.sh "$BASE_SHA"
