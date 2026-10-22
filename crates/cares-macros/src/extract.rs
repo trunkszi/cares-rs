@@ -5,7 +5,9 @@
 
 use proc_macro2::TokenStream;
 use quote::{ToTokens, format_ident, quote};
-use syn::{Data, DeriveInput, Fields, FieldsNamed, Ident, LitStr, Type, spanned::Spanned};
+use syn::{
+    Data, DeriveInput, Fields, FieldsNamed, Ident, LitStr, Type, ext::IdentExt, spanned::Spanned,
+};
 
 pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     let input: DeriveInput = syn::parse2(input)?;
@@ -514,7 +516,7 @@ fn bind_fields(fields: &FieldsNamed, model: &Model) -> syn::Result<Bound> {
                 "DnsRecordExtract requires named fields",
             ));
         };
-        let name = ident.to_string();
+        let name = ident.unraw().to_string();
         if let Some(index) = model.fields.iter().position(|spec| spec.name == name) {
             if seen[index] {
                 return Err(syn::Error::new_spanned(ident, "duplicate record field"));
@@ -586,6 +588,8 @@ fn canonical_type(ty: &Type) -> String {
             .replace("std::vec::", "")
             .replace("std::string::", "")
             .replace("std::net::", "")
+            .replace("::core::net::", "")
+            .replace("core::net::", "")
             .replace("::cares::record_rr::", "")
             .replace("cares::record_rr::", "")
             .replace("::cares::types::", "")
@@ -613,7 +617,7 @@ fn emit(
         quote! { #ident: parsed.#ident }
     });
     let owner_read = bound.owner.as_ref().map(|ident| {
-        quote! { #ident: rr.name()?.to_owned(), }
+        quote! { #ident: ::std::borrow::ToOwned::to_owned(rr.name()?), }
     });
     let ttl_read = bound.ttl.as_ref().map(|ident| quote! { #ident: rr.ttl(), });
     let class_read = bound
@@ -632,7 +636,7 @@ fn emit(
     let owner_string = if let Some(ident) = &bound.owner {
         quote! { ::core::clone::Clone::clone(&self.#ident) }
     } else {
-        quote! { ::std::string::String::from(".") }
+        quote! { ::std::borrow::ToOwned::to_owned(".") }
     };
     let ttl_expr = if let Some(ident) = &bound.ttl {
         quote! { self.#ident }
@@ -648,7 +652,7 @@ fn emit(
     quote! {
         impl #name {
             /// Numeric DNS type code selected by `rr_type`.
-            #vis const RR_TYPE_CODE: u16 = #code;
+            #vis const RR_TYPE_CODE: ::core::primitive::u16 = #code;
 
             /// Collect every matching resource record in the annotated section.
             ///
@@ -697,8 +701,11 @@ fn emit(
                 record: ::cares::record::DnsRecordRef<'_>,
             ) -> ::cares::error::Result<Self> {
                 let found = record.records::<Self>(::cares::types::DnsSection::#section)?;
-                let mut iter = found.into_iter();
-                match (iter.next(), iter.next()) {
+                let mut iter = ::core::iter::IntoIterator::into_iter(found);
+                match (
+                    ::core::iter::Iterator::next(&mut iter),
+                    ::core::iter::Iterator::next(&mut iter),
+                ) {
                     (
                         ::core::option::Option::Some(value),
                         ::core::option::Option::None,
@@ -718,7 +725,7 @@ fn emit(
                 let ttl = #ttl_expr;
                 let dns_class = #class_expr;
                 let owner_owned = #owner_string;
-                let owner: &str = owner_owned.as_str();
+                let owner: &::core::primitive::str = owner_owned.as_str();
                 let mut record = ::cares::record::DnsRecord::new(
                     0u16,
                     ::cares::types::DnsFlags::QR,

@@ -86,6 +86,10 @@ pub fn derive_dns_record_extract(input: TokenStream) -> TokenStream {
 /// caller buffer. `decode` routes the first question of a query or a response
 /// without allocating.
 ///
+/// `dispatch()` returns the static slot metadata in declaration order. The
+/// `DISPATCH` constant aliases that metadata unless a slot produces a `DISPATCH`
+/// enum variant; use `dispatch()` for tables containing that variant.
+///
 /// Legal classes are `IN`, `CS`, `CH`, `CHAOS`, `HS`, `HESIOD`, `NONE`, and
 /// `ANY`. Legal types are the c-ares record types except the `RawRr` sentinel.
 ///
@@ -120,7 +124,7 @@ pub fn derive_dns_record_extract(input: TokenStream) -> TokenStream {
 /// assert_eq!(Queries::Web.rr_type(), 1);
 /// assert_eq!(Queries::Web.dns_class(), 1);
 /// assert_eq!(Queries::SLOT_COUNT, 1);
-/// assert_eq!(Queries::DISPATCH[0].name, "web");
+/// assert_eq!(Queries::dispatch()[0].name, "web");
 /// ```
 #[proc_macro]
 pub fn cares_query_table(input: TokenStream) -> TokenStream {
