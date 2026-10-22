@@ -389,9 +389,9 @@ impl Resolver {
         *self.host.server_state_cb.borrow_mut() = Some(Rc::new(callback));
     }
 
-    /// Reports whether a completion callback panicked.
+    /// Reports whether a completion callback or readiness sink panicked.
     pub fn is_poisoned(&self) -> bool {
-        self.host.is_poisoned()
+        self.host.state.is_poisoned() || self.sockets.readiness_sink_failed()
     }
 
     /// Returns the next c-ares deadline for the caller's proactor timer.
@@ -402,10 +402,20 @@ impl Resolver {
     /// c-ares' retry schedule.
     ///
     /// # Errors
-    /// Returns the channel-liveness error after the resolver is destroyed.
+    /// Returns [`AresError::CallbackPanicked`] for a poisoned resolver, or the
+    /// channel-liveness error after the resolver is destroyed.
     pub fn timer_deadline(&mut self) -> Result<Option<TimerDeadline>> {
+        self.ensure_healthy()?;
         let channel = self.host.ready()?;
         Ok(self.timer.refresh(channel))
+    }
+
+    fn ensure_healthy(&self) -> Result<()> {
+        if self.is_poisoned() {
+            Err(AresError::CallbackPanicked)
+        } else {
+            Ok(())
+        }
     }
 
     /// Replaces the readiness sink driven by the internal socket bridge.

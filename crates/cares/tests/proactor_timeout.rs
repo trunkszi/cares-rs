@@ -9,7 +9,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use cares::{ProactorResolver, error::AresStatus, options::ResolverOptions, types::DnsRecordType};
+use cares::{
+    ProactorResolver,
+    error::{AresError, AresStatus},
+    options::ResolverOptions,
+    resolver::Resolver,
+    socket_bridge::{ReadinessSink, SocketInterest},
+    types::DnsRecordType,
+};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -59,5 +66,49 @@ fn proactor_armed_timer_expires_a_blackholed_query() -> TestResult {
     proactor.shutdown()?;
     drop(proactor);
     drop(blackhole);
+    Ok(())
+}
+
+struct PanickingSink;
+
+impl ReadinessSink for PanickingSink {
+    fn update_interest(&self, _fd: libc::c_int, _interest: SocketInterest) {
+        panic!("readiness notification failed");
+    }
+
+    fn remove_interest(&self, _fd: libc::c_int) {}
+}
+
+#[test]
+fn readiness_sink_panic_poison_gates_deadlines_and_channel_operations() -> TestResult {
+    let blackhole = UdpSocket::bind(("127.0.0.1", 0))?;
+    let mut resolver = Resolver::new(ResolverOptions::builder().build()?)?;
+    resolver.set_servers_csv(&format!("127.0.0.1:{}", blackhole.local_addr()?.port()))?;
+    resolver.install_readiness_sink(Rc::new(PanickingSink))?;
+    assert!(matches!(
+        resolver.submit_query("sink-panic.test.", DnsRecordType::A, |_, _| {}),
+        Err(AresError::CallbackPanicked)
+    ));
+    assert!(resolver.is_poisoned());
+    assert!(matches!(
+        resolver.timer_deadline(),
+        Err(AresError::CallbackPanicked)
+    ));
+    assert!(matches!(
+        resolver.poll_completions(),
+        Err(AresError::CallbackPanicked)
+    ));
+    assert!(matches!(
+        resolver.servers_csv(),
+        Err(AresError::CallbackPanicked)
+    ));
+    assert!(matches!(
+        resolver.cancel(),
+        Err(AresError::CallbackPanicked)
+    ));
+    assert!(matches!(
+        resolver.submit_query("second.test.", DnsRecordType::A, |_, _| {}),
+        Err(AresError::CallbackPanicked)
+    ));
     Ok(())
 }

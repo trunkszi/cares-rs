@@ -7,7 +7,6 @@
 //! c-ares dispatches socket-state notifications from inside
 //! `ares_process_fds`; [`SharedChannelState::process_fds`] defers those raised
 //! inside the call and drops entries for descriptors closed or reused meanwhile.
-
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
@@ -26,7 +25,6 @@ use cares_sys::{
 use libc::{c_char, c_int, c_uint, c_void, sockaddr, sockaddr_storage, socklen_t};
 
 use crate::error::{AresError, Result};
-
 const OPT_SENDBUF_SIZE: c_uint = ares_socket_opt_t::ARES_SOCKET_OPT_SENDBUF_SIZE.0;
 const OPT_RECVBUF_SIZE: c_uint = ares_socket_opt_t::ARES_SOCKET_OPT_RECVBUF_SIZE.0;
 const OPT_BIND_DEVICE: c_uint = ares_socket_opt_t::ARES_SOCKET_OPT_BIND_DEVICE.0;
@@ -66,7 +64,6 @@ struct PendingSocketUpdate {
 struct ProcessScopeGuard<'a> {
     state: &'a SharedChannelState,
 }
-
 impl Drop for ProcessScopeGuard<'_> {
     fn drop(&mut self) {
         let depth = self.state.depth.get().saturating_sub(1);
@@ -91,13 +88,11 @@ pub struct SharedChannelState {
     next_generation: Cell<u64>,
     _not_send: PhantomData<*mut ()>,
 }
-
 impl Default for SharedChannelState {
     fn default() -> Self {
         Self::new()
     }
 }
-
 impl SharedChannelState {
     /// Creates an empty bridge with no readiness sink installed.
     pub fn new() -> Self {
@@ -151,7 +146,11 @@ impl SharedChannelState {
     }
     /// Installs the consumer that receives interest changes.
     pub fn set_readiness_sink(&self, sink: Rc<dyn ReadinessSink>) {
-        *self.sink.borrow_mut() = Some(sink);
+        let previous = self.sink.borrow_mut().replace(sink);
+        self.catch_sink(|| drop(previous));
+        if self.sink_failed.get() {
+            self.shutdown();
+        }
     }
     /// Coalesces readiness for a live `fd`; flags are OR-ed, order is kept.
     /// The caller must cancel old registrations before fd reuse: fd-only
@@ -457,17 +456,14 @@ impl SharedChannelState {
     pub fn pending_interest_count(&self) -> usize {
         self.pending.borrow().len()
     }
-
     fn next_generation(&self) -> u64 {
         let generation = self.next_generation.get().wrapping_add(1);
         self.next_generation.set(generation);
         generation
     }
-
     fn cached_peer(&self, fd: ares_socket_t) -> Option<(sockaddr_storage, ares_socklen_t)> {
         self.sockets.borrow().get(&fd).and_then(|entry| entry.peer)
     }
-
     fn flush_pending(&self) {
         let pending = std::mem::take(&mut *self.pending.borrow_mut());
         if pending.is_empty() {
@@ -481,7 +477,6 @@ impl SharedChannelState {
             self.notify_sink(|sink| sink.update_interest(update.fd, update.interest));
         }
     }
-
     fn catch_sink(&self, callback: impl FnOnce()) {
         if let Err(payload) = catch_unwind(AssertUnwindSafe(callback)) {
             self.sink_failed.set(true);
@@ -494,7 +489,6 @@ impl SharedChannelState {
             }
         }
     }
-
     fn notify_sink(&self, callback: impl FnOnce(&dyn ReadinessSink)) {
         if self.sink_failed.get() {
             return;
@@ -506,6 +500,16 @@ impl SharedChannelState {
         self.catch_sink(|| drop(sink));
         if self.sink_failed.get() {
             self.shutdown();
+        }
+    }
+}
+impl Drop for SharedChannelState {
+    fn drop(&mut self) {
+        self.shutdown();
+        // A retained payload may itself panic on drop, including during another unwind.
+        let payload = self.sink_panic.get_mut().take();
+        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| drop(payload))) {
+            std::mem::forget(payload);
         }
     }
 }
