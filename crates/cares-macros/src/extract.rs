@@ -614,16 +614,19 @@ fn emit(
     let code = model.code;
     let read_fields = bound.fields.iter().map(|field| {
         let ident = &field.ident;
-        quote! { #ident: parsed.#ident }
+        quote! { #ident: __cares_parsed.#ident }
     });
     let owner_read = bound.owner.as_ref().map(|ident| {
-        quote! { #ident: ::std::borrow::ToOwned::to_owned(rr.name()?), }
+        quote! { #ident: ::std::borrow::ToOwned::to_owned(__cares_rr.name()?), }
     });
-    let ttl_read = bound.ttl.as_ref().map(|ident| quote! { #ident: rr.ttl(), });
+    let ttl_read = bound
+        .ttl
+        .as_ref()
+        .map(|ident| quote! { #ident: __cares_rr.ttl(), });
     let class_read = bound
         .dns_class
         .as_ref()
-        .map(|ident| quote! { #ident: rr.class()?, });
+        .map(|ident| quote! { #ident: __cares_rr.class()?, });
     let write_fields = bound.fields.iter().map(|field| {
         let ident = &field.ident;
         if field.ty.is_copy() {
@@ -662,9 +665,9 @@ fn emit(
             /// # Panics
             /// This function does not panic.
             #vis fn extract_from_record(
-                record: ::cares::record::DnsRecordRef<'_>,
+                __cares_record: ::cares::record::DnsRecordRef<'_>,
             ) -> ::cares::error::Result<::std::vec::Vec<Self>> {
-                record.records::<Self>(::cares::types::DnsSection::#section)
+                __cares_record.records::<Self>(::cares::types::DnsSection::#section)
             }
         }
 
@@ -672,9 +675,9 @@ fn emit(
             const RECORD_TYPE: ::cares::types::DnsRecordType = ::cares::types::DnsRecordType::#variant;
 
             fn from_dns_rr(
-                rr: ::cares::record_rr::DnsRr<'_>,
+                __cares_rr: ::cares::record_rr::DnsRr<'_>,
             ) -> ::cares::error::Result<Self> {
-                let parsed = rr.#extract()?;
+                let __cares_parsed = __cares_rr.#extract()?;
                 ::core::result::Result::Ok(Self {
                     #(#read_fields,)*
                     #owner_read
@@ -689,27 +692,27 @@ fn emit(
 
             fn write_dns_rr(
                 &self,
-                rr: &mut ::cares::record_rr::DnsRrMut<'_>,
+                __cares_rr: &mut ::cares::record_rr::DnsRrMut<'_>,
             ) -> ::cares::error::Result<()> {
-                let parsed = ::cares::record_rr::#model_ty { #(#write_fields,)* };
-                ::cares::record_rr::IntoDnsRr::write_dns_rr(&parsed, rr)
+                let __cares_parsed = ::cares::record_rr::#model_ty { #(#write_fields,)* };
+                ::cares::record_rr::IntoDnsRr::write_dns_rr(&__cares_parsed, __cares_rr)
             }
         }
 
         impl ::cares::record::FromDnsRecord for #name {
             fn from_dns_record(
-                record: ::cares::record::DnsRecordRef<'_>,
+                __cares_record: ::cares::record::DnsRecordRef<'_>,
             ) -> ::cares::error::Result<Self> {
-                let found = record.records::<Self>(::cares::types::DnsSection::#section)?;
-                let mut iter = ::core::iter::IntoIterator::into_iter(found);
+                let __cares_found = __cares_record.records::<Self>(::cares::types::DnsSection::#section)?;
+                let mut __cares_iter = ::core::iter::IntoIterator::into_iter(__cares_found);
                 match (
-                    ::core::iter::Iterator::next(&mut iter),
-                    ::core::iter::Iterator::next(&mut iter),
+                    ::core::iter::Iterator::next(&mut __cares_iter),
+                    ::core::iter::Iterator::next(&mut __cares_iter),
                 ) {
                     (
-                        ::core::option::Option::Some(value),
+                        ::core::option::Option::Some(__cares_value),
                         ::core::option::Option::None,
-                    ) => ::core::result::Result::Ok(value),
+                    ) => ::core::result::Result::Ok(__cares_value),
                     _ => ::core::result::Result::Err(::cares::error::AresError::invalid_record(
                         ::std::concat!(
                             "expected exactly one matching resource record in ",
@@ -722,29 +725,29 @@ fn emit(
 
         impl ::cares::record::IntoDnsRecord for #name {
             fn into_dns_record(self) -> ::cares::error::Result<::cares::record::DnsRecord> {
-                let ttl = #ttl_expr;
-                let dns_class = #class_expr;
-                let owner_owned = #owner_string;
-                let owner: &::core::primitive::str = owner_owned.as_str();
-                let mut record = ::cares::record::DnsRecord::new(
+                let __cares_ttl = #ttl_expr;
+                let __cares_dns_class = #class_expr;
+                let __cares_owner_owned = #owner_string;
+                let __cares_owner: &::core::primitive::str = __cares_owner_owned.as_str();
+                let mut __cares_record = ::cares::record::DnsRecord::new(
                     0u16,
                     ::cares::types::DnsFlags::QR,
                     ::cares::types::DnsOpcode::Query,
                     ::cares::types::DnsRcode::NoError,
                 )?;
-                record.query_add(
-                    owner,
+                __cares_record.query_add(
+                    __cares_owner,
                     <Self as ::cares::record_rr::IntoDnsRr>::RECORD_TYPE,
-                    dns_class,
+                    __cares_dns_class,
                 )?;
-                record.add_record(
+                __cares_record.add_record(
                     ::cares::types::DnsSection::#section,
-                    owner,
-                    dns_class,
-                    ttl,
+                    __cares_owner,
+                    __cares_dns_class,
+                    __cares_ttl,
                     &self,
                 )?;
-                ::core::result::Result::Ok(record)
+                ::core::result::Result::Ok(__cares_record)
             }
         }
     }
