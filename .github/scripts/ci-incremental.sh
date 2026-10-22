@@ -154,5 +154,9 @@ for package in "${packages[@]}"; do
       ;;
   esac
 done
+for example in dns_packet_codec_and_edns standalone_resolver_and_records proactor_shared_ring_resolver; do
+  echo "Running cares example $example"
+  cargo run -p cares --example "$example"
+done
 
 echo "Incremental CI passed for: ${packages[*]}"

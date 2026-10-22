@@ -34,6 +34,8 @@ cares-rs/
 │       ├── src/socket_bridge.rs
 │       ├── src/timer.rs
 │       ├── src/resolver.rs
+│       ├── examples/                 # dns_packet_codec_and_edns, standalone_resolver_and_records,
+│       │                             # proactor_shared_ring_resolver
 │       └── tests/{mock_dns_server,adversarial_e2e}.rs
 └── .github/scripts/ci-incremental.sh # Full incremental gate in the integrated workspace
 ```
@@ -86,11 +88,22 @@ Run every command from the workspace root. These are the commands to run; do not
 | `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps` | Build rustdoc with warnings denied. |
 | `cargo test -p cares --test mock_dns_server` | Run the mock DNS server target on its own. |
 | `cargo test -p cares --test adversarial_e2e` | Run the end-to-end resolver suite. |
+| `cargo run -p cares --example dns_packet_codec_and_edns` | Run the DNS packet codec and EDNS example. |
+| `cargo run -p cares --example standalone_resolver_and_records` | Run the standalone resolver and typed-record example. |
+| `cargo run -p cares --example proactor_shared_ring_resolver` | Run the shared-ring proactor example. |
 | `bash .github/scripts/ci-incremental.sh` | Full incremental gate in the integrated workspace. |
 
 `.github/scripts/ci-incremental.sh` is added when the workspace is integrated and is not present in this worktree. When it is absent, run the equivalent commands in the table above; when it is present, run it before completing a change.
 
-There is no example target in the initial workspace. If one is added later, run it with `cargo run --example <name>` before completing the change.
+The workspace has three required example targets under `crates/cares/examples/`. Run each one before completing a change:
+
+```bash
+cargo run -p cares --example dns_packet_codec_and_edns
+cargo run -p cares --example standalone_resolver_and_records
+cargo run -p cares --example proactor_shared_ring_resolver
+```
+
+`dns_packet_codec_and_edns` exercises DNS message encoding, decoding, and `OPT`/EDNS handling. `standalone_resolver_and_records` resolves through the standalone completion driver and decodes typed records. `proactor_shared_ring_resolver` registers `ProactorResolver` on a real `liburing::Proactor` and drives completions from the shared ring.
 
 ## Hard Invariants
 
