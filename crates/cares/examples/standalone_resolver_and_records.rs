@@ -433,12 +433,20 @@ impl Responder {
 
     fn stop(mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.stop.store(true, Ordering::Release);
+        let mut first_error = None;
         for worker in self.workers.drain(..) {
-            worker
-                .join()
-                .map_err(|_| io::Error::other("a responder worker panicked"))?;
+            if let Err(payload) = worker.join()
+                && first_error.is_none()
+            {
+                first_error = Some(io::Error::other(format!(
+                    "a responder worker panicked: {payload:?}"
+                )));
+            }
         }
-        Ok(())
+        match first_error {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
+        }
     }
 }
 
