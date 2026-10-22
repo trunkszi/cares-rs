@@ -1,0 +1,24 @@
+[package]
+name = "cares-sys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Threadless static CMake build and modern FFI bindings for c-ares"
+links = "cares"
+
+[features]
+default = ["pre-release"]
+pre-release = []
+stable = []
+
+[dependencies]
+libc = { workspace = true }
+
+[build-dependencies]
+cmake = { workspace = true }
+cc = { workspace = true }
+
+[lints]
+workspace = true
