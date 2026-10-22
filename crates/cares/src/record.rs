@@ -214,14 +214,36 @@ macro_rules! read_methods {
             Ok(records)
         }
 
+        fn validate_wire_header(&self) -> Result<()> {
+            // SAFETY: self owns or borrows a live immutable DNS message.
+            let rcode = unsafe { sys::ares_dns_record_get_rcode(self.as_ptr()) }.0;
+            if rcode <= 15 {
+                return Ok(());
+            }
+            for index in 0..self.rr_count(DnsSection::Additional) {
+                let rr = self.rr(DnsSection::Additional, index)?;
+                // SAFETY: rr borrows live immutable storage owned by this message.
+                if unsafe { sys::ares_dns_rr_get_type(rr.as_ptr()) } == sys::ARES_REC_TYPE_OPT {
+                    return Ok(());
+                }
+            }
+            // c-ares substitutes SERVFAIL when an extended response code lacks OPT.
+            Err(AresError::invalid_record(
+                "extended DNS response code requires an Additional OPT record",
+            ))
+        }
+
         /// Serialize the complete DNS message into an owned wire buffer.
         ///
         /// # Errors
         /// Returns an error if the record is incomplete or allocation fails.
+        /// Returns [`AresError::InvalidRecord`] if an extended response code
+        /// has no OPT record in the Additional section.
         ///
         /// # Panics
         /// This function has no explicit panic path.
         pub fn write_wire(&self) -> Result<Vec<u8>> {
+            self.validate_wire_header()?;
             let mut raw = ptr::null_mut();
             let mut len = 0;
             AresError::check(
@@ -347,6 +369,8 @@ impl DnsRecord {
     /// Duplicate this message into independent c-ares storage.
     ///
     /// # Errors
+    /// Returns [`AresError::InvalidRecord`] if an extended response code
+    /// has no OPT record in the Additional section.
     /// Returns [`AresError::AllocationFailed`] if duplication fails, including
     /// invalid or incomplete messages rejected by c-ares during duplication.
     ///
@@ -603,12 +627,15 @@ impl<'cb> DnsRecordRef<'cb> {
     /// Duplicate the borrowed message into independent owned storage.
     ///
     /// # Errors
+    /// Returns [`AresError::InvalidRecord`] if an extended response code
+    /// has no OPT record in the Additional section.
     /// Returns [`AresError::AllocationFailed`] if duplication fails, including
     /// invalid or incomplete messages rejected by c-ares during duplication.
     ///
     /// # Panics
     /// This function has no explicit panic path.
     pub fn to_owned_record(&self) -> Result<DnsRecord> {
+        self.validate_wire_header()?;
         // SAFETY: self borrows a live immutable message for the duration of duplication.
         let raw = unsafe { sys::ares_dns_record_duplicate(self.as_ptr()) };
         // SAFETY: duplication returns a newly allocated record with ownership transferred to us.

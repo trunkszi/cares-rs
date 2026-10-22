@@ -233,22 +233,45 @@ fn malformed_input_and_failed_rr_add_are_rejected() -> Result<()> {
 }
 
 #[test]
-fn opt_payload_class_and_unknown_options_survive_wire() -> Result<()> {
-    let mut record = DnsRecord::builder()
-        .question("example.test", DnsRecordType::A, DnsClass::IN)
-        .build()?;
+fn integration_scenario_extended_rcodes_and_opt_survive_wire_and_copies() -> Result<()> {
+    use cares::types::DnsRcode;
     let value = OptRecord {
         udp_size: 4096,
         version: 0,
         flags: 0x8000,
         options: vec![(65000, vec![0, 255, 1])],
     };
-    record.add_record(DnsSection::Additional, "", DnsClass::IN, 0, &value)?;
-    let parsed = DnsRecord::parse_wire(&record.write_wire()?)?;
-    let rr = parsed.rr(DnsSection::Additional, 0)?;
-    assert_eq!(rr.class()?, DnsClass::IN);
-    assert_eq!(DnsClass::new(4096).as_raw(), 4096);
-    assert_eq!(rr.as_opt()?, value);
+    for rcode in [DnsRcode::NoError, DnsRcode::BADVERS, DnsRcode::BadCookie] {
+        let mut record = DnsRecord::builder()
+            .rcode(rcode)
+            .question("example.test", DnsRecordType::A, DnsClass::IN)
+            .build()?;
+        if rcode.as_raw() > 15 {
+            assert!(matches!(
+                record.write_wire(),
+                Err(AresError::InvalidRecord(_))
+            ));
+            assert!(matches!(
+                record.try_clone(),
+                Err(AresError::InvalidRecord(_))
+            ));
+            assert!(matches!(
+                record.as_ref().to_owned_record(),
+                Err(AresError::InvalidRecord(_))
+            ));
+        }
+        record.add_record(DnsSection::Additional, "", DnsClass::IN, 0, &value)?;
+        for copy in [
+            DnsRecord::parse_wire(&record.write_wire()?)?,
+            record.try_clone()?,
+            record.as_ref().to_owned_record()?,
+        ] {
+            assert_eq!(copy.rcode()?, rcode);
+            let rr = copy.rr(DnsSection::Additional, 0)?;
+            assert_eq!(rr.class()?, DnsClass::IN);
+            assert_eq!(rr.as_opt()?, value);
+        }
+    }
     Ok(())
 }
 
