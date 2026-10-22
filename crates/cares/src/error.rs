@@ -189,7 +189,7 @@ impl AresError {
     /// Callers should use [`Self::check`] when success is possible.
     ///
     /// # Panics
-    /// This function has no explicit panic path; allocation follows Rust's
+    /// Panics from the supplied conversion propagate; allocation follows Rust's
     /// allocator failure policy.
     pub fn from_status(status: impl Into<AresStatus>) -> Self {
         let status = status.into();
@@ -205,7 +205,7 @@ impl AresError {
     /// Returns the exact non-success status and its upstream description.
     ///
     /// # Panics
-    /// This function has no explicit panic path.
+    /// Panics from the supplied conversion propagate.
     pub fn check(status: impl Into<AresStatus>) -> Result<()> {
         let status = status.into();
         if status.is_success() {
@@ -218,7 +218,7 @@ impl AresError {
     /// Creates an input validation error.
     ///
     /// # Panics
-    /// This function has no explicit panic path.
+    /// Panics from the supplied conversion propagate.
     pub fn invalid_input(message: impl Into<String>) -> Self {
         Self::InvalidInput(message.into())
     }
@@ -226,7 +226,7 @@ impl AresError {
     /// Creates a malformed or missing record-field error.
     ///
     /// # Panics
-    /// This function has no explicit panic path.
+    /// Panics from the supplied conversion propagate.
     pub fn invalid_record(message: impl Into<String>) -> Self {
         Self::InvalidRecord(message.into())
     }

@@ -1,13 +1,18 @@
 //! Borrowed DNS resource records and lossless owned models for common RR types.
 
-use std::marker::PhantomData;
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::ptr::{self, NonNull};
+use std::{
+    marker::PhantomData,
+    net::{Ipv4Addr, Ipv6Addr},
+    ptr::{self, NonNull},
+};
 
-use crate::error::{AresError, Result};
-use crate::record::{DnsRecord, c_string, text};
-use crate::types::{DnsClass, DnsRecordType};
 use cares_sys as sys;
+
+use crate::{
+    error::{AresError, Result},
+    record::{DnsRecord, c_string, text},
+    types::{DnsClass, DnsRecordType},
+};
 
 type Key = sys::ares_dns_rr_key_t;
 
@@ -116,7 +121,7 @@ impl<'a> DnsRr<'a> {
     /// Returns an error if the type differs or a field is invalid.
     ///
     /// # Panics
-    /// This function has no explicit panic path.
+    /// Panics from the caller-provided decoder propagate.
     pub fn extract<T: FromDnsRr>(&self) -> Result<T> {
         T::from_dns_rr(*self)
     }
@@ -153,7 +158,7 @@ impl<'a> DnsRrMut<'a> {
     /// Returns an error for a mismatched type, invalid fields or allocation failure.
     ///
     /// # Panics
-    /// This function has no explicit panic path.
+    /// Panics from the caller-provided encoder propagate; fields may already be modified.
     pub fn set<T: IntoDnsRr>(&mut self, value: &T) -> Result<()> {
         value.write_dns_rr(self)
     }
@@ -257,7 +262,8 @@ fn copy_binary(raw: *const u8, len: usize) -> Result<Vec<u8>> {
     if raw.is_null() || len > isize::MAX as usize {
         return Err(AresError::invalid_record("invalid binary field"));
     }
-    // SAFETY: callers pass c-ares field pointers with their lengths, protected by immutable RR borrows.
+    // SAFETY: callers pass c-ares field pointers with their lengths, protected by immutable RR
+    // borrows.
     Ok(unsafe { std::slice::from_raw_parts(raw, len) }.to_vec())
 }
 
@@ -266,9 +272,15 @@ impl Field for Vec<u8> {
         let mut len = 0;
         // SAFETY: rr is live and len is a writable output containing the field's byte length.
         let raw = unsafe { sys::ares_dns_rr_get_bin(rr.as_ptr(), key, &mut len) };
+        if len == 0 {
+            return Err(AresError::invalid_record("missing required binary RR data"));
+        }
         copy_binary(raw, len)
     }
     fn write(rr: &mut DnsRrMut<'_>, key: Key, value: &Self) -> Result<()> {
+        if value.is_empty() {
+            return Err(AresError::invalid_input("binary RR data must not be empty"));
+        }
         rr.set_binary(key, value)
     }
 }
@@ -277,21 +289,37 @@ impl Field for Vec<Vec<u8>> {
     fn read(rr: &DnsRr<'_>, key: Key) -> Result<Self> {
         // SAFETY: the typed model supplies the TXT array field key for a live RR.
         let count = unsafe { sys::ares_dns_rr_get_abin_cnt(rr.as_ptr(), key) };
+        if count == 0 {
+            return Err(AresError::invalid_record(
+                "TXT requires at least one character string",
+            ));
+        }
         let mut values = Vec::with_capacity(count);
         for index in 0..count {
             let mut len = 0;
             // SAFETY: index is in range and rr remains immutably borrowed while copying.
             let raw = unsafe { sys::ares_dns_rr_get_abin(rr.as_ptr(), key, index, &mut len) };
+            if len > 255 {
+                return Err(AresError::invalid_record(
+                    "TXT character string exceeds 255 bytes",
+                ));
+            }
             values.push(copy_binary(raw, len)?);
         }
         Ok(values)
     }
     fn write(rr: &mut DnsRrMut<'_>, key: Key, value: &Self) -> Result<()> {
+        if value.is_empty() || value.iter().any(|chunk| chunk.len() > 255) {
+            return Err(AresError::invalid_input(
+                "TXT needs at least one string, each at most 255 bytes",
+            ));
+        }
         // SAFETY: c-ares validates the array key on this live RR.
         let count = unsafe { sys::ares_dns_rr_get_abin_cnt(rr.raw.as_ptr(), key) };
         for index in (0..count).rev() {
             AresError::check(
-                // SAFETY: reverse deletion keeps every remaining index valid with exclusive access.
+                // SAFETY: reverse deletion keeps every remaining index valid with exclusive
+                // access.
                 unsafe { sys::ares_dns_rr_del_abin(rr.raw.as_ptr(), key, index) }.0 as i32,
             )?;
         }
@@ -309,7 +337,12 @@ impl Field for Vec<Vec<u8>> {
 }
 
 /// Ordered service-binding parameters or EDNS0 options, preserving unknown keys.
+/// HTTPS and SVCB parameters must have strictly increasing identifiers.
 pub type DnsOptions = Vec<(u16, Vec<u8>)>;
+fn ordered_service_params(key: Key, values: &DnsOptions) -> bool {
+    (key != sys::ARES_RR_SVCB_PARAMS && key != sys::ARES_RR_HTTPS_PARAMS)
+        || values.windows(2).all(|pair| pair[0].0 < pair[1].0)
+}
 impl Field for DnsOptions {
     fn read(rr: &DnsRr<'_>, key: Key) -> Result<Self> {
         // SAFETY: the typed model supplies a valid options field key for this live RR.
@@ -323,9 +356,20 @@ impl Field for DnsOptions {
                 unsafe { sys::ares_dns_rr_get_opt(rr.as_ptr(), key, index, &mut raw, &mut len) };
             values.push((id, copy_binary(raw, len)?));
         }
+        if !ordered_service_params(key, &values) {
+            return Err(AresError::invalid_record(
+                "service parameters are not strictly increasing",
+            ));
+        }
         Ok(values)
     }
     fn write(rr: &mut DnsRrMut<'_>, key: Key, value: &Self) -> Result<()> {
+        let mut seen = std::collections::BTreeSet::new();
+        if !ordered_service_params(key, value) || value.iter().any(|(id, _)| !seen.insert(*id)) {
+            return Err(AresError::invalid_input(
+                "DNS option identifiers must be unique and service parameters ordered",
+            ));
+        }
         let existing = DnsOptions::read(&rr.as_ref(), key)?;
         for (id, _) in existing {
             AresError::check(
@@ -333,13 +377,10 @@ impl Field for DnsOptions {
                 unsafe { sys::ares_dns_rr_del_opt_byid(rr.raw.as_ptr(), key, id) }.0 as i32,
             )?;
         }
-        let mut seen = std::collections::BTreeSet::new();
         for (id, bytes) in value {
-            if !seen.insert(*id) {
-                return Err(AresError::invalid_input("duplicate DNS option identifier"));
-            }
             AresError::check(
-                // SAFETY: c-ares validates the key and copies all bytes during this exclusive call.
+                // SAFETY: c-ares validates the key and copies all bytes during this exclusive
+                // call.
                 unsafe {
                     sys::ares_dns_rr_set_opt(rr.raw.as_ptr(), key, *id, bytes.as_ptr(), bytes.len())
                 }
@@ -376,7 +417,8 @@ impl Field for Ipv6Addr {
             return Err(AresError::invalid_record("missing IPv6 address"));
         }
         let mut bytes = [0u8; 16];
-        // SAFETY: ares_in6_addr contains exactly 16 network-order bytes; source and destination do not overlap.
+        // SAFETY: ares_in6_addr contains exactly 16 network-order bytes; source and destination do
+        // not overlap.
         unsafe { ptr::copy_nonoverlapping(raw.cast::<u8>(), bytes.as_mut_ptr(), bytes.len()) };
         Ok(Ipv6Addr::from(bytes))
     }
@@ -492,7 +534,7 @@ model!(
         exchange: String = ARES_RR_MX_EXCHANGE
     }
 );
-model!(/// A TXT record preserving individual binary character strings.
+model!(/// A TXT record preserving one or more binary strings of at most 255 bytes.
     TxtRecord, TXT, as_txt { /// Ordered character-string segments, including embedded NUL bytes.
     chunks: Vec<Vec<u8>> = ARES_RR_TXT_DATA });
 model!(
@@ -615,3 +657,112 @@ model!(
         options: DnsOptions = ARES_RR_OPT_OPTIONS
     }
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{DnsClass, DnsRecordType, DnsSection};
+
+    #[test]
+    fn binary_pointer_validation_precedes_slice_construction() -> Result<()> {
+        assert!(copy_binary(ptr::null(), 0)?.is_empty());
+        assert!(copy_binary(ptr::null(), 1).is_err());
+        assert!(copy_binary(NonNull::<u8>::dangling().as_ptr(), isize::MAX as usize + 1).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn empty_parameters_are_valid_and_missing_binary_data_is_rejected() -> Result<()> {
+        let mut record = DnsRecord::builder()
+            .question("empty.test", DnsRecordType::HTTPS, DnsClass::IN)
+            .build()?;
+        let https = HttpsRecord {
+            priority: 1,
+            target: "svc.test".into(),
+            params: vec![],
+        };
+        let svcb = SvcbRecord {
+            priority: 1,
+            target: "svc.test".into(),
+            params: vec![],
+        };
+        record.add_record(DnsSection::Answer, "empty.test", DnsClass::IN, 0, &https)?;
+        record.add_record(DnsSection::Answer, "empty.test", DnsClass::IN, 0, &svcb)?;
+        let tls = record.rr_add(
+            DnsSection::Additional,
+            "empty.test",
+            DnsRecordType::TLSA,
+            DnsClass::IN,
+            0,
+        )?;
+        assert!(tls.as_ref().as_tlsa().is_err());
+        record.rr_del(DnsSection::Additional, 0)?;
+        let empty_tls = TlsaRecord {
+            cert_usage: 3,
+            selector: 1,
+            matching_type: 1,
+            data: vec![],
+        };
+        assert!(
+            record
+                .add_record(
+                    DnsSection::Additional,
+                    "empty.test",
+                    DnsClass::IN,
+                    0,
+                    &empty_tls
+                )
+                .is_err()
+        );
+        assert_eq!(record.rr_count(DnsSection::Additional), 0);
+        let parsed = DnsRecord::parse_wire(&record.write_wire()?)?;
+        assert_eq!(parsed.rr(DnsSection::Answer, 0)?.as_https()?, https);
+        assert_eq!(parsed.rr(DnsSection::Answer, 1)?.as_svcb()?, svcb);
+        Ok(())
+    }
+
+    #[test]
+    fn unordered_service_parameters_are_rejected_on_write_and_read() -> Result<()> {
+        let mut record = DnsRecord::builder()
+            .question("order.test", DnsRecordType::HTTPS, DnsClass::IN)
+            .build()?;
+        let bad = SvcbRecord {
+            priority: 1,
+            target: "svc.test".into(),
+            params: vec![(65401, vec![1]), (65400, vec![2])],
+        };
+        assert!(
+            record
+                .add_record(DnsSection::Answer, "order.test", DnsClass::IN, 0, &bad)
+                .is_err()
+        );
+        assert_eq!(record.rr_count(DnsSection::Answer), 0);
+        let mut rr = record.rr_add(
+            DnsSection::Answer,
+            "order.test",
+            DnsRecordType::HTTPS,
+            DnsClass::IN,
+            0,
+        )?;
+        rr.set_u16(sys::ARES_RR_HTTPS_PRIORITY, 1)?;
+        rr.set_string(sys::ARES_RR_HTTPS_TARGET, "svc.test")?;
+        for id in [65401, 65400] {
+            // SAFETY: the RR is exclusively borrowed, the key matches HTTPS,
+            // and c-ares copies this one-byte value during the call. Ordering
+            // is deliberately malformed to exercise typed extraction rejection.
+            AresError::check(unsafe {
+                sys::ares_dns_rr_set_opt(
+                    rr.raw.as_ptr(),
+                    sys::ARES_RR_HTTPS_PARAMS,
+                    id,
+                    b"v".as_ptr(),
+                    1,
+                )
+            })?;
+        }
+        assert!(rr.as_ref().as_https().is_err());
+        let parsed = DnsRecord::parse_wire(&record.write_wire()?)?;
+        assert!(parsed.records::<HttpsRecord>(DnsSection::Answer).is_err());
+        Ok(())
+    }
+}
