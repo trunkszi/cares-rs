@@ -133,13 +133,14 @@ for name in sorted(selected):
 PY
 )"
 
+cargo fmt --all -- --check
+
 if [ -z "$selection" ]; then
   echo "No workspace packages affected."
   exit 0
 fi
 mapfile -t packages <<< "$selection"
 
-cargo fmt --all -- --check
 for package in "${packages[@]}"; do
   echo "Checking $package with the default upstream source"
   cargo clippy -p "$package" --all-targets -- -D warnings
@@ -154,9 +155,24 @@ for package in "${packages[@]}"; do
       ;;
   esac
 done
-for example in dns_packet_codec_and_edns standalone_resolver_and_records proactor_shared_ring_resolver; do
-  echo "Running cares example $example"
+shopt -s nullglob
+example_paths=(crates/cares/examples/*.rs)
+shopt -u nullglob
+if [ "${#example_paths[@]}" -lt 3 ]; then
+  echo "expected at least 3 cares examples, found ${#example_paths[@]}" >&2
+  exit 1
+fi
+examples=()
+for path in "${example_paths[@]}"; do
+  examples+=("$(basename "$path" .rs)")
+done
+for example in "${examples[@]}"; do
+  echo "Running cares example $example with default features"
   cargo run -p cares --example "$example"
+done
+for example in "${examples[@]}"; do
+  echo "Running cares example $example with stable features"
+  cargo run -p cares --no-default-features --features stable --example "$example"
 done
 
 echo "Incremental CI passed for: ${packages[*]}"

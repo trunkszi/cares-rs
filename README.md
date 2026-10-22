@@ -59,7 +59,7 @@ cargo run -p cares --example proactor_shared_ring_resolver
 
 - `dns_packet_codec_and_edns` builds and parses wire messages with an EDNS0 `OPT` record and typed answers.
 - `standalone_resolver_and_records` runs local UDP/TCP queries through `wait_completions`, including a re-entrant CNAME lookup.
-- `proactor_shared_ring_resolver` drives `ProactorResolver` on a real `liburing::Proactor`; a truncated UDP answer forces TCP fallback and socket-bridge growth.
+- `proactor_shared_ring_resolver` drives `ProactorResolver` on a real `liburing::Proactor`; a truncated UDP answer forces TCP fallback and socket-bridge growth. It requires a kernel with io_uring and fails if the ring cannot be created.
 
 The codec example is pure in-memory; the two resolver examples bind a deterministic `127.0.0.1:0` responder. Each prints a short summary and exits with status 0.
 

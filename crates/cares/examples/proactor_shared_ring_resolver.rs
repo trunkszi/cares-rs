@@ -70,22 +70,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         enable_waker: false,
         ..liburing::ProactorConfig::default()
     };
-    let mut proactor = match Proactor::new(config) {
-        Ok(proactor) => proactor,
-        Err(UringError::RingInit(errno))
-            if matches!(
-                errno.saturating_abs(),
-                libc::EPERM | libc::EACCES | libc::ENOSYS
-            ) =>
-        {
-            println!(
-                "io_uring unavailable: Proactor::new failed with errno {}; skipping",
-                errno.saturating_abs()
-            );
-            return Ok(());
-        }
-        Err(error) => return Err(format!("proactor init failed: {error}").into()),
-    };
+    // A real shared-ring run is the point of this example; a host without
+    // io_uring must fail rather than report a silent skip.
+    let mut proactor =
+        Proactor::new(config).map_err(|error| format!("proactor init failed: {error}"))?;
 
     let responder = DnsResponder::start()?;
     let options = ResolverOptions::builder()
