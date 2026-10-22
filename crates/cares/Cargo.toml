@@ -1,0 +1,30 @@
+[package]
+name = "cares"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Threadless, completion-driven c-ares resolver for single-threaded proactor runtimes"
+
+[features]
+default = ["pre-release"]
+pre-release = ["cares-sys/pre-release", "liburing/pre-release", "liburing-sys/pre-release"]
+stable = ["cares-sys/stable", "liburing/stable", "liburing-sys/stable"]
+
+[dependencies]
+cares-sys = { workspace = true }
+cares-macros = { workspace = true }
+liburing = { git = "https://github.com/trunkszi/liburing-rs.git", branch = "main", default-features = false }
+liburing-sys = { git = "https://github.com/trunkszi/liburing-rs.git", branch = "main", default-features = false }
+liburing-macros = { git = "https://github.com/trunkszi/liburing-rs.git", branch = "main", default-features = false }
+libc = { workspace = true }
+bitflags = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+cares-sys = { workspace = true }
+libc = { workspace = true }
+
+[lints]
+workspace = true
