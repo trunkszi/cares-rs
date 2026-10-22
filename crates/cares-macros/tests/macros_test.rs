@@ -623,3 +623,125 @@ fn integration_query_dispatch_slot_keeps_routing_and_metadata() -> Result<(), &'
     }
     Ok(())
 }
+
+#[allow(non_upper_case_globals)]
+mod caller_constants_hygiene {
+    use crate::{
+        error,
+        record::{FromDnsRecord, IntoDnsRecord},
+        types::DnsClass,
+    };
+
+    const parsed: u8 = 0;
+    const cursor: usize = 0;
+    const id: usize = 0;
+    const packet: usize = 0;
+    const question: usize = 0;
+    const wire: usize = 0;
+    const length: usize = 0;
+    const record: usize = 0;
+    const rr: usize = 0;
+    const found: usize = 0;
+    const iter: usize = 0;
+    const value: usize = 0;
+    const ttl: usize = 0;
+    const dns_class: usize = 0;
+    const owner: usize = 0;
+    const owner_owned: usize = 0;
+    const end: usize = 0;
+    const fields: usize = 0;
+    const size: usize = 0;
+    const mask: usize = 0;
+    const byte: usize = 0;
+    const next: usize = 0;
+    const buffer: usize = 0;
+    const rr_type: usize = 0;
+    const class: usize = 0;
+    const question_end: usize = 0;
+    const visited: usize = 0;
+    const label: usize = 0;
+
+    #[derive(Clone, Debug, PartialEq, Eq, cares_macros::DnsRecordExtract)]
+    #[dns(rr_type = "A", section = "Answer")]
+    struct Host {
+        address: std::net::Ipv4Addr,
+        owner: String,
+        ttl: u32,
+        dns_class: DnsClass,
+    }
+
+    cares_macros::cares_query_table! {
+        enum Routes {
+            host { name: "constants.example", rr_type: A, class: IN },
+            host_v6 { name: "constants.example", rr_type: AAAA, class: CH },
+        }
+    }
+
+    #[test]
+    fn integration_record_conversions_ignore_caller_constants() -> error::Result<()> {
+        let host = Host {
+            address: std::net::Ipv4Addr::new(192, 0, 2, 81),
+            owner: String::from("constants.example"),
+            ttl: 123,
+            dns_class: DnsClass::CH,
+        };
+        let message = host.clone().into_dns_record()?;
+        assert_eq!(Host::from_dns_record(message.as_ref())?, host);
+        assert_eq!(Host::extract_from_record(message.as_ref())?, vec![host]);
+        assert_eq!(message.questions[0].0, "constants.example");
+        assert_eq!(message.records[0].1.ttl, 123);
+        assert_eq!(message.records[0].1.class, DnsClass::CH);
+        assert_eq!((parsed, record, rr, found, iter, value), (0, 0, 0, 0, 0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn integration_query_routing_ignores_caller_constants() -> Result<(), &'static str> {
+        let mut bytes = [0_u8; 64];
+        for route in [Routes::Host, Routes::HostV6] {
+            let written = route.encode(0x1234, &mut bytes)?;
+            assert_eq!(&bytes[..2], &[0x12, 0x34]);
+            assert_eq!(Routes::decode(&bytes[..written])?, route);
+            let metadata = &Routes::dispatch()[usize::from(route.rr_type() == 28)];
+            assert_eq!(metadata.name, route.slot_name());
+            assert_eq!(metadata.qname, route.qname());
+            assert_eq!(metadata.rr_type, route.rr_type());
+            assert_eq!(metadata.dns_class, route.dns_class());
+        }
+        assert_eq!(Routes::dispatch(), &Routes::DISPATCH);
+        let written = Routes::Host.encode(7, &mut bytes)?;
+        let mut compressed = [0_u8; 64];
+        compressed[..12].copy_from_slice(&bytes[..12]);
+        compressed[12..18].copy_from_slice(&[0xc0, 18, 0, 1, 0, 1]);
+        compressed[18..written + 2].copy_from_slice(&bytes[12..written - 4]);
+        assert_eq!(Routes::decode(&compressed[..written + 2])?, Routes::Host);
+        assert_eq!(
+            [
+                cursor,
+                id,
+                packet,
+                question,
+                wire,
+                length,
+                ttl,
+                dns_class,
+                owner,
+                owner_owned,
+                end,
+                fields,
+                size,
+                mask,
+                byte,
+                next,
+                buffer,
+                rr_type,
+                class,
+                question_end,
+                visited,
+                label
+            ],
+            [0; 22]
+        );
+        Ok(())
+    }
+}

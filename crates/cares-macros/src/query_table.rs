@@ -104,6 +104,7 @@ pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
         .into_iter()
         .map(|slot| {
             let name = slot.name.unraw().to_string();
+            validate_slot_name(&slot.name, &name)?;
             if !names.insert(name.clone()) {
                 return Err(syn::Error::new(
                     slot.name.span(),
@@ -143,14 +144,22 @@ pub(crate) fn expand(input: TokenStream) -> syn::Result<TokenStream> {
     Ok(emit(table.visibility, table.name, &slots))
 }
 
+fn validate_slot_name(name: &Ident, text: &str) -> syn::Result<()> {
+    let message = if !text.is_ascii() {
+        "query slot name must contain only ASCII characters"
+    } else if text.starts_with('_') || text.ends_with('_') {
+        "query slot name must not start or end with an underscore"
+    } else if text.contains("__") {
+        "query slot name must not contain consecutive underscores"
+    } else {
+        return Ok(());
+    };
+    Err(syn::Error::new(name.span(), message))
+}
+
 fn variant_name(name: &Ident) -> syn::Result<Ident> {
     let mut variant = String::new();
-    for part in name
-        .unraw()
-        .to_string()
-        .split('_')
-        .filter(|part| !part.is_empty())
-    {
+    for part in name.unraw().to_string().split('_') {
         let mut characters = part.chars();
         if let Some(first) = characters.next() {
             variant.extend(first.to_uppercase());
@@ -345,17 +354,17 @@ fn emit(visibility: Visibility, name: Ident, slots: &[CheckedSlot]) -> TokenStre
             ///
             /// # Errors
             /// Returns an error without changing the buffer if it is too short.
-            pub fn encode(self, id: ::core::primitive::u16, buffer: &mut [::core::primitive::u8]) -> ::core::result::Result<::core::primitive::usize, &'static ::core::primitive::str> {
-                let question: &[::core::primitive::u8] = match self { #(Self::#variants => #questions,)* };
-                let length = 12 + question.len();
-                if buffer.len() < length {
+            pub fn encode(self, __cares_id: ::core::primitive::u16, __cares_buffer: &mut [::core::primitive::u8]) -> ::core::result::Result<::core::primitive::usize, &'static ::core::primitive::str> {
+                let __cares_question: &[::core::primitive::u8] = match self { #(Self::#variants => #questions,)* };
+                let __cares_length = 12 + __cares_question.len();
+                if __cares_buffer.len() < __cares_length {
                     return ::core::result::Result::Err("DNS query buffer is too short");
                 }
-                buffer[..12].copy_from_slice(&[
-                    (id >> 8) as ::core::primitive::u8, id as ::core::primitive::u8, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+                __cares_buffer[..12].copy_from_slice(&[
+                    (__cares_id >> 8) as ::core::primitive::u8, __cares_id as ::core::primitive::u8, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0,
                 ]);
-                buffer[12..length].copy_from_slice(question);
-                ::core::result::Result::Ok(length)
+                __cares_buffer[12..__cares_length].copy_from_slice(__cares_question);
+                ::core::result::Result::Ok(__cares_length)
             }
 
             /// Routes the first question, accepting compressed and mixed-case names.
@@ -365,20 +374,20 @@ fn emit(visibility: Visibility, name: Ident, slots: &[CheckedSlot]) -> TokenStre
             /// # Errors
             /// Rejects truncated headers or questions, nonstandard opcodes, invalid label tags,
             /// compression loops, overlong names, and questions absent from this table.
-            pub fn decode(packet: &[::core::primitive::u8]) -> ::core::result::Result<Self, &'static ::core::primitive::str> {
-                if packet.len() < 12 {
+            pub fn decode(__cares_packet: &[::core::primitive::u8]) -> ::core::result::Result<Self, &'static ::core::primitive::str> {
+                if __cares_packet.len() < 12 {
                     return ::core::result::Result::Err("truncated DNS header");
                 }
-                if packet[2] & 0x78 != 0 || packet[3] & 0x40 != 0 {
+                if __cares_packet[2] & 0x78 != 0 || __cares_packet[3] & 0x40 != 0 {
                     return ::core::result::Result::Err("unsupported DNS header flags");
                 }
-                if packet[4] == 0 && packet[5] == 0 {
+                if __cares_packet[4] == 0 && __cares_packet[5] == 0 {
                     return ::core::result::Result::Err("DNS message has no question");
                 }
-                let (wire, length, rr_type, class) = Self::__decode_question(packet)?;
+                let (__cares_wire, __cares_length, __cares_rr_type, __cares_class) = Self::__decode_question(__cares_packet)?;
                 #(
-                    if rr_type == #types && class == #classes
-                        && wire[..length].eq_ignore_ascii_case(#wires)
+                    if __cares_rr_type == #types && __cares_class == #classes
+                        && __cares_wire[..__cares_length].eq_ignore_ascii_case(#wires)
                     {
                         return ::core::result::Result::Ok(Self::#variants);
                     }
@@ -386,51 +395,51 @@ fn emit(visibility: Visibility, name: Ident, slots: &[CheckedSlot]) -> TokenStre
                 ::core::result::Result::Err("DNS question is absent from the query table")
             }
 
-            fn __decode_question(packet: &[::core::primitive::u8]) -> ::core::result::Result<([::core::primitive::u8; 255], ::core::primitive::usize, ::core::primitive::u16, ::core::primitive::u16), &'static ::core::primitive::str> {
-                let mut wire = [0_u8; 255];
-                let mut length = 0;
-                let mut cursor = 12;
-                let mut question_end = ::core::option::Option::None;
-                let mut visited = [0_u8; 2048];
+            fn __decode_question(__cares_packet: &[::core::primitive::u8]) -> ::core::result::Result<([::core::primitive::u8; 255], ::core::primitive::usize, ::core::primitive::u16, ::core::primitive::u16), &'static ::core::primitive::str> {
+                let mut __cares_wire = [0_u8; 255];
+                let mut __cares_length = 0;
+                let mut __cares_cursor = 12;
+                let mut __cares_question_end = ::core::option::Option::None;
+                let mut __cares_visited = [0_u8; 2048];
                 loop {
-                    let byte = *packet.get(cursor).ok_or("truncated DNS question name")?;
-                    if byte & 0xc0 == 0xc0 {
-                        let next = *packet.get(cursor + 1).ok_or("truncated DNS pointer")?;
-                        if question_end.is_none() {
-                            question_end = ::core::option::Option::Some(cursor + 2);
+                    let __cares_byte = *__cares_packet.get(__cares_cursor).ok_or("truncated DNS question name")?;
+                    if __cares_byte & 0xc0 == 0xc0 {
+                        let __cares_next = *__cares_packet.get(__cares_cursor + 1).ok_or("truncated DNS pointer")?;
+                        if __cares_question_end.is_none() {
+                            __cares_question_end = ::core::option::Option::Some(__cares_cursor + 2);
                         }
-                        cursor = (::core::primitive::usize::from(byte & 0x3f) << 8) | ::core::primitive::usize::from(next);
-                        if cursor < 12 || cursor >= packet.len() {
+                        __cares_cursor = (::core::primitive::usize::from(__cares_byte & 0x3f) << 8) | ::core::primitive::usize::from(__cares_next);
+                        if __cares_cursor < 12 || __cares_cursor >= __cares_packet.len() {
                             return ::core::result::Result::Err("invalid DNS compression target");
                         }
-                        let mask = 1_u8 << (cursor % 8);
-                        if visited[cursor / 8] & mask != 0 {
+                        let __cares_mask = 1_u8 << (__cares_cursor % 8);
+                        if __cares_visited[__cares_cursor / 8] & __cares_mask != 0 {
                             return ::core::result::Result::Err("DNS compression loop");
                         }
-                        visited[cursor / 8] |= mask;
+                        __cares_visited[__cares_cursor / 8] |= __cares_mask;
                         continue;
                     }
-                    if byte & 0xc0 != 0 {
+                    if __cares_byte & 0xc0 != 0 {
                         return ::core::result::Result::Err("unsupported DNS label tag");
                     }
-                    let size = ::core::primitive::usize::from(byte);
-                    if length + size + 1 > wire.len() {
+                    let __cares_size = ::core::primitive::usize::from(__cares_byte);
+                    if __cares_length + __cares_size + 1 > __cares_wire.len() {
                         return ::core::result::Result::Err("DNS question name exceeds 255 bytes");
                     }
-                    wire[length] = byte;
-                    length += 1;
-                    cursor += 1;
-                    if size == 0 {
-                        let end = match question_end { ::core::option::Option::Some(end) => end, ::core::option::Option::None => cursor };
-                        let fields = packet.get(end..end + 4).ok_or("truncated DNS question fields")?;
-                        return ::core::result::Result::Ok((wire, length,
-                            ::core::primitive::u16::from_be_bytes([fields[0], fields[1]]),
-                            ::core::primitive::u16::from_be_bytes([fields[2], fields[3]])));
+                    __cares_wire[__cares_length] = __cares_byte;
+                    __cares_length += 1;
+                    __cares_cursor += 1;
+                    if __cares_size == 0 {
+                        let __cares_end = match __cares_question_end { ::core::option::Option::Some(__cares_end) => __cares_end, ::core::option::Option::None => __cares_cursor };
+                        let __cares_fields = __cares_packet.get(__cares_end..__cares_end + 4).ok_or("truncated DNS question fields")?;
+                        return ::core::result::Result::Ok((__cares_wire, __cares_length,
+                            ::core::primitive::u16::from_be_bytes([__cares_fields[0], __cares_fields[1]]),
+                            ::core::primitive::u16::from_be_bytes([__cares_fields[2], __cares_fields[3]])));
                     }
-                    let label = packet.get(cursor..cursor + size).ok_or("truncated DNS label")?;
-                    wire[length..length + size].copy_from_slice(label);
-                    length += size;
-                    cursor += size;
+                    let __cares_label = __cares_packet.get(__cares_cursor..__cares_cursor + __cares_size).ok_or("truncated DNS label")?;
+                    __cares_wire[__cares_length..__cares_length + __cares_size].copy_from_slice(__cares_label);
+                    __cares_length += __cares_size;
+                    __cares_cursor += __cares_size;
                 }
             }
         }
@@ -442,6 +451,52 @@ mod tests {
     use quote::quote;
 
     use super::expand;
+
+    #[test]
+    fn unit_scenario_rejects_ambiguous_slot_names() -> syn::Result<()> {
+        let edges = "query slot name must not start or end with an underscore";
+        let repeated = "query slot name must not contain consecutive underscores";
+        let non_ascii = "query slot name must contain only ASCII characters";
+        for (text, expected) in [
+            ("_web", edges),
+            ("web_", edges),
+            ("web__a", repeated),
+            ("r#web__a", repeated),
+            ("\u{df}_a", non_ascii),
+            ("r#\u{df}_a", non_ascii),
+        ] {
+            let name = syn::parse_str::<syn::Ident>(text)?;
+            let input = quote! { enum T { #name { name: "a", rr_type: A, class: IN } } };
+            let error = match expand(input) {
+                Err(error) => error,
+                Ok(_) => panic!("invalid slot {text} was accepted"),
+            };
+            assert_eq!(error.to_string(), expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unit_scenario_accepts_raw_ascii_and_uppercase_slots() -> syn::Result<()> {
+        let output = expand(quote! {
+            enum T {
+                r#type { name: "raw", rr_type: A, class: IN },
+                DISPATCH { name: "dispatch", rr_type: A, class: IN },
+                web_a { name: "web", rr_type: A, class: IN },
+            }
+        })?;
+        let file = syn::parse2::<syn::File>(output)?;
+        let syn::Item::Enum(table) = &file.items[0] else {
+            panic!("query table did not produce an enum");
+        };
+        let variants = table
+            .variants
+            .iter()
+            .map(|value| value.ident.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(variants, ["Type", "DISPATCH", "WebA"]);
+        Ok(())
+    }
 
     #[test]
     fn unit_scenario_rejects_invalid_query_declarations() {

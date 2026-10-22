@@ -4,6 +4,8 @@
 //! struct whose fields match one built-in resource-record model. [`cares_query_table`]
 //! checks query slots while compiling and emits a routing enum that encodes and
 //! decodes standard questions without allocating.
+//!
+//! The `__cares_` prefix is reserved for generated implementation bindings.
 
 #![forbid(unsafe_code)]
 
@@ -82,7 +84,9 @@ pub fn derive_dns_record_extract(input: TokenStream) -> TokenStream {
 ///
 /// Each slot names a presentation-format domain, a resource-record type, and a
 /// class. Slot identifiers become `PascalCase` enum variants (`web_a` becomes
-/// `WebA`). `encode` writes one standard query (RD set, QDCOUNT 1) into a
+/// `WebA`). Identifiers must be ASCII, without leading, trailing, or consecutive
+/// underscores. Names that produce the same enum variant are rejected.
+/// `encode` writes one standard query (RD set, QDCOUNT 1) into a
 /// caller buffer. `decode` routes the first question of a query or a response
 /// without allocating.
 ///
