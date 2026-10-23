@@ -1,0 +1,29 @@
+[package]
+name = "cares"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "Threadless, completion-driven c-ares resolver for single-threaded proactor runtimes"
+
+[features]
+default = ["pre-release"]
+pre-release = ["cares-sys/pre-release"]
+stable = ["cares-sys/stable"]
+
+[dependencies]
+cares-sys = { workspace = true }
+cares-macros = { workspace = true }
+liburing = { workspace = true }
+libc = { workspace = true }
+bitflags = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+liburing-macros = { workspace = true }
+cares-sys = { workspace = true }
+libc = { workspace = true }
+
+[lints]
+workspace = true
