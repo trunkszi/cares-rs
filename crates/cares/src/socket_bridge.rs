@@ -47,6 +47,8 @@ struct SocketEntry {
     socket_type: c_int,
     /// Peer cached by a successful datagram `connect(2)`.
     peer: Option<(sockaddr_storage, ares_socklen_t)>,
+    /// Last READ/WRITE mask accepted for this generation. Repeats are ignored.
+    interest: Option<SocketInterest>,
 }
 /// Interest notification recorded while a process scope is active.
 #[derive(Clone, Copy, Debug)]
@@ -438,6 +440,9 @@ impl SharedChannelState {
             let Some(entry) = sockets.get_mut(&fd) else {
                 return;
             };
+            if entry.interest.replace(interest) == Some(interest) {
+                return;
+            }
             entry.generation
         };
         if self.depth.get() > 0 {

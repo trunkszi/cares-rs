@@ -24,6 +24,11 @@ thiserror = { workspace = true }
 liburing-macros = { workspace = true }
 cares-sys = { workspace = true }
 libc = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "dns_hotpath_bench"
+harness = false
 
 [lints]
 workspace = true
