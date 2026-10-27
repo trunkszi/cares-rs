@@ -3,29 +3,128 @@
 //! c-ares uses synchronous socket callbacks, so this adapter alone owns its
 //! POLL_ADD readiness state. The ring owns neither the resolver nor its dispatcher.
 
+mod polls;
+
 use std::{
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
+    os::fd::{AsRawFd, OwnedFd},
     rc::Rc,
     time::{Duration, Instant},
 };
 
 use liburing::{
-    Completion, CompletionDispatcher, OperationId, OperationPayload, Proactor, SubmissionContext,
-    SubsystemId, UringError, ops::Timeout,
+    Completion, CompletionDispatcher, OperationId, Proactor, SubmissionContext, SubsystemId,
+    UringError, ops::Timeout,
 };
+use polls::{Identities, Polls};
 
 use crate::{
     Resolver, ResolverCqe,
     error::{AresError, Result},
     options::ResolverOptions,
-    socket_bridge::SocketInterest,
 };
+
+/// Active half of the driver hierarchy: nothing queued, or work is staged.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActivePhase {
+    /// No DNS poll, timeout, or cancel control is queued.
+    Idle = 0,
+    /// At least one registration is staged or in flight.
+    Armed = 1,
+}
+
+/// Shutdown half of the driver hierarchy. Leaves stay sticky until work retires.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownPhase {
+    /// Socket polls still need a cancel submission or a terminal CQE.
+    CancelingPolls = 0,
+    /// Timeouts or cancel controls are still outstanding.
+    DrainingTimers = 1,
+    /// Every DNS registration owned by this driver has retired.
+    Stopped = 2,
+}
+
+/// One-byte driver phase.
+///
+/// `Active` is [`ActivePhase`], `Faulted` means a channel error is stored and
+/// shutdown has not started, and `ShuttingDown` is [`ShutdownPhase`]. A stored
+/// [`AresError`] stays beside this byte because it does not fit in the phase.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DriverPhase {
+    Idle = 0,
+    Armed = 1,
+    Faulted = 2,
+    CancelingPolls = 3,
+    DrainingTimers = 4,
+    Stopped = 5,
+}
+
+impl DriverPhase {
+    const fn is_shutdown(self) -> bool {
+        matches!(
+            self,
+            Self::CancelingPolls | Self::DrainingTimers | Self::Stopped
+        )
+    }
+
+    fn sync(self, polls_pending: bool, timers_pending: bool) -> Self {
+        if self.is_shutdown() {
+            let leaf = if polls_pending {
+                ShutdownPhase::CancelingPolls
+            } else if timers_pending {
+                ShutdownPhase::DrainingTimers
+            } else {
+                ShutdownPhase::Stopped
+            };
+            Self::from(leaf)
+        } else if self == Self::Faulted {
+            Self::Faulted
+        } else if polls_pending || timers_pending {
+            Self::from(ActivePhase::Armed)
+        } else {
+            Self::from(ActivePhase::Idle)
+        }
+    }
+}
+
+impl From<ActivePhase> for DriverPhase {
+    fn from(phase: ActivePhase) -> Self {
+        match phase {
+            ActivePhase::Idle => Self::Idle,
+            ActivePhase::Armed => Self::Armed,
+        }
+    }
+}
+
+impl From<ShutdownPhase> for DriverPhase {
+    fn from(phase: ShutdownPhase) -> Self {
+        match phase {
+            ShutdownPhase::CancelingPolls => Self::CancelingPolls,
+            ShutdownPhase::DrainingTimers => Self::DrainingTimers,
+            ShutdownPhase::Stopped => Self::Stopped,
+        }
+    }
+}
+
+/// Lifecycle of one armed DNS timeout slot.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimerSlotPhase {
+    /// The timeout SQE is the generation currently requested.
+    Armed = 0,
+    /// A cancel SQE has been accepted for this timeout.
+    Canceling = 1,
+    /// The timeout CQE was consumed and the slot can leave the table.
+    Retired = 2,
+}
 
 struct TimerOperation {
     id: OperationId,
     generation: u64,
     timeout: Timeout,
-    canceling: bool,
+    phase: TimerSlotPhase,
 }
 
 /// Owns one resolver and its socket/deadline registrations outside the ring.
@@ -41,7 +140,7 @@ pub struct ProactorResolver {
     subsystem: SubsystemId,
     timers: Vec<TimerOperation>,
     identities: Identities,
-    shutting_down: bool,
+    phase: DriverPhase,
     failure: Option<AresError>,
 }
 
@@ -69,7 +168,7 @@ impl ProactorResolver {
             subsystem,
             timers: Vec::new(),
             identities: Identities::new(subsystem),
-            shutting_down: false,
+            phase: DriverPhase::from(ActivePhase::Idle),
             failure: None,
         })
     }
@@ -95,21 +194,44 @@ impl ProactorResolver {
 
     fn deadline(&mut self) -> liburing::Result<Option<crate::timer::TimerDeadline>> {
         self.resolver.timer_deadline().map_err(|error| {
-            self.failure.get_or_insert(error);
+            self.remember(error);
             UringError::InvalidConfig("DNS resolver deadline failed")
         })
     }
 
-    fn flush_to(&mut self, submit: &mut impl Submit) -> liburing::Result<()> {
-        if self.shutting_down {
-            return self.stop_to(submit);
+    fn remember(&mut self, error: AresError) {
+        if self.failure.is_none() {
+            self.failure = Some(error);
         }
+        if !self.phase.is_shutdown() {
+            self.phase = DriverPhase::Faulted;
+        }
+    }
+
+    fn sync_phase(&mut self) {
+        self.phase = self.phase.sync(
+            self.polls.pending > 0,
+            !self.timers.is_empty() || self.identities.has_pending(),
+        );
+    }
+
+    fn flush_to(&mut self, submit: &mut impl Submit) -> liburing::Result<()> {
+        let result = if self.phase.is_shutdown() {
+            self.stop_to(submit)
+        } else {
+            self.stage_to(submit)
+        };
+        self.sync_phase();
+        result
+    }
+
+    fn stage_to(&mut self, submit: &mut impl Submit) -> liburing::Result<()> {
         let deadline = self.deadline()?;
         let current = deadline.map(|value| value.generation);
         for timer in &mut self.timers {
-            if Some(timer.generation) != current && !timer.canceling {
+            if Some(timer.generation) != current && timer.phase == TimerSlotPhase::Armed {
                 match self.identities.cancel(submit, timer.id) {
-                    Ok(()) => timer.canceling = true,
+                    Ok(()) => timer.phase = TimerSlotPhase::Canceling,
                     Err(UringError::SqRingFull) => return Ok(()),
                     Err(error) => return Err(error),
                 }
@@ -130,7 +252,7 @@ impl ProactorResolver {
                     id,
                     generation: deadline.generation,
                     timeout,
-                    canceling: false,
+                    phase: TimerSlotPhase::Armed,
                 }),
                 Err(UringError::SqRingFull) => return Ok(()),
                 Err(error) => return Err(error),
@@ -151,7 +273,13 @@ impl ProactorResolver {
     /// Reports queued or in-flight DNS polls, timeouts, and cancel acknowledgments.
     #[must_use]
     pub fn has_pending_io(&self) -> bool {
-        self.polls.has_pending() || !self.timers.is_empty() || self.identities.has_pending()
+        match self.phase {
+            DriverPhase::Idle | DriverPhase::Stopped => false,
+            DriverPhase::Faulted => {
+                self.polls.pending > 0 || !self.timers.is_empty() || self.identities.has_pending()
+            }
+            DriverPhase::Armed | DriverPhase::CancelingPolls | DriverPhase::DrainingTimers => true,
+        }
     }
 
     /// Stops accepting queries and requests cancellation without closing the ring.
@@ -162,7 +290,9 @@ impl ProactorResolver {
     /// # Errors
     /// Returns channel cancellation or ring submission failure; pending state remains owned.
     pub fn begin_shutdown(&mut self, proactor: &mut Proactor) -> Result<()> {
-        self.shutting_down = true;
+        if !self.phase.is_shutdown() {
+            self.phase = DriverPhase::from(ShutdownPhase::CancelingPolls);
+        }
         let channel = self.resolver.stop_submissions();
         let registrations = self.flush(proactor);
         channel.and(registrations)
@@ -204,9 +334,9 @@ impl ProactorResolver {
     fn stop_to(&mut self, submit: &mut impl Submit) -> liburing::Result<()> {
         self.polls.stop(submit, &mut self.identities)?;
         for timer in &mut self.timers {
-            if !timer.canceling {
+            if timer.phase == TimerSlotPhase::Armed {
                 match self.identities.cancel(submit, timer.id) {
-                    Ok(()) => timer.canceling = true,
+                    Ok(()) => timer.phase = TimerSlotPhase::Canceling,
                     Err(UringError::SqRingFull) => return Ok(()),
                     Err(error) => return Err(error),
                 }
@@ -217,7 +347,7 @@ impl ProactorResolver {
 
     fn deliver(&mut self, cqe: ResolverCqe) -> liburing::Result<()> {
         self.resolver.on_cqe(cqe).map(|_| ()).map_err(|error| {
-            self.failure.get_or_insert(error);
+            self.remember(error);
             UringError::InvalidConfig("DNS resolver completion failed")
         })
     }
@@ -236,6 +366,7 @@ impl CompletionDispatcher for ProactorResolver {
         }
         submissions.claim_completion(completion)?;
         if self.identities.complete(completion.operation_id) {
+            self.sync_phase();
             if !matches!(completion.result, 0)
                 && ![-libc::ENOENT, -libc::EALREADY, -libc::ECANCELED].contains(&completion.result)
             {
@@ -246,21 +377,23 @@ impl CompletionDispatcher for ProactorResolver {
             .iter()
             .position(|timer| timer.id == completion.operation_id)
         {
-            let timer = self.timers.swap_remove(index);
-            if completion.result == -libc::ETIME && !self.shutting_down {
-                self.deliver(ResolverCqe::Timer {
-                    generation: timer.generation,
-                })?;
+            let mut timer = self.timers.swap_remove(index);
+            let generation = timer.generation;
+            let _previous = std::mem::replace(&mut timer.phase, TimerSlotPhase::Retired);
+            self.sync_phase();
+            if completion.result == -libc::ETIME && !self.phase.is_shutdown() {
+                self.deliver(ResolverCqe::Timer { generation })?;
             } else if completion.result != -libc::ECANCELED && completion.result != -libc::ETIME {
                 return Err(UringError::syscalls("DNS timeout", completion.result));
             }
         } else {
             let event = self.polls.complete(completion, &self.resolver);
+            self.sync_phase();
             if completion.result < 0 && completion.result != -libc::ECANCELED {
                 return Err(UringError::syscalls("DNS poll", completion.result));
             }
             if let Some((fd, readable, writable)) = event
-                && !self.shutting_down
+                && !self.phase.is_shutdown()
             {
                 self.deliver(ResolverCqe::Socket {
                     fd,
@@ -271,6 +404,7 @@ impl CompletionDispatcher for ProactorResolver {
         }
         // Teardown dispatch has no submission credit and must only retire state.
         if submissions.remaining_capacity() == 0 {
+            self.sync_phase();
             return Ok(());
         }
         self.flush_to(submissions)
@@ -284,215 +418,6 @@ impl Drop for ProactorResolver {
         for timer in self.timers.drain(..) {
             std::mem::forget(timer.timeout);
         }
-    }
-}
-
-struct Identities {
-    subsystem: SubsystemId,
-    next: u64,
-    controls: Vec<OperationId>,
-}
-
-impl Identities {
-    fn new(subsystem: SubsystemId) -> Self {
-        Self {
-            subsystem,
-            next: 1,
-            controls: Vec::new(),
-        }
-    }
-    fn next(&mut self) -> liburing::Result<OperationId> {
-        let payload =
-            OperationPayload::new(self.next).ok_or(UringError::PayloadOverflow(self.next))?;
-        self.next = self
-            .next
-            .checked_add(1)
-            .ok_or(UringError::PayloadOverflow(self.next))?;
-        Ok(OperationId::pack(self.subsystem, payload))
-    }
-    fn cancel(&mut self, submit: &mut impl Submit, target: OperationId) -> liburing::Result<()> {
-        let id = self.next()?;
-        submit.cancel(id, target)?;
-        self.controls.push(id);
-        Ok(())
-    }
-    fn complete(&mut self, id: OperationId) -> bool {
-        if let Some(index) = self.controls.iter().position(|&control| control == id) {
-            self.controls.swap_remove(index);
-            true
-        } else {
-            false
-        }
-    }
-    fn inflight_count(&self) -> usize {
-        self.controls.len()
-    }
-    fn has_pending(&self) -> bool {
-        !self.controls.is_empty()
-    }
-}
-
-struct PollState {
-    fd: i32,
-    generation: u64,
-    socket: Rc<OwnedFd>,
-    desired: SocketInterest,
-    submitted: SocketInterest,
-    active: Option<OperationId>,
-    canceling: bool,
-    wanted: bool,
-}
-
-struct Polls {
-    states: Vec<PollState>,
-    interests: Vec<(i32, u64, SocketInterest)>,
-}
-
-impl Polls {
-    fn new(capacity: usize) -> Self {
-        Self {
-            states: Vec::with_capacity(capacity),
-            interests: Vec::with_capacity(capacity),
-        }
-    }
-
-    fn reconcile(
-        &mut self,
-        resolver: &Resolver,
-        submit: &mut impl Submit,
-        ids: &mut Identities,
-    ) -> liburing::Result<()> {
-        resolver.poll_interests(&mut self.interests);
-        for state in &mut self.states {
-            state.wanted = false;
-        }
-        for &(fd, generation, interest) in &self.interests {
-            if !interest.readable && !interest.writable {
-                continue;
-            }
-            if let Some(state) = self
-                .states
-                .iter_mut()
-                .find(|state| state.fd == fd && state.generation == generation)
-            {
-                state.desired = interest;
-                state.wanted = true;
-            } else {
-                // SAFETY: c-ares still owns this live descriptor on the caller
-                // thread. The duplicate retains this socket across original-fd
-                // closure, reuse, and staged or canceling poll operations.
-                let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 0) };
-                if duplicate < 0 {
-                    return Err(std::io::Error::last_os_error().into());
-                }
-                // SAFETY: fcntl returned a new descriptor owned by this call.
-                let socket = Rc::new(unsafe { OwnedFd::from_raw_fd(duplicate) });
-                self.states.push(PollState {
-                    fd,
-                    generation,
-                    socket,
-                    desired: interest,
-                    submitted: SocketInterest::default(),
-                    active: None,
-                    canceling: false,
-                    wanted: true,
-                });
-            }
-        }
-        self.cancel_changed(submit, ids)
-    }
-
-    fn stop(&mut self, submit: &mut impl Submit, ids: &mut Identities) -> liburing::Result<()> {
-        for state in &mut self.states {
-            state.wanted = false;
-        }
-        self.cancel_changed(submit, ids)
-    }
-
-    fn cancel_changed(
-        &mut self,
-        submit: &mut impl Submit,
-        ids: &mut Identities,
-    ) -> liburing::Result<()> {
-        for state in &mut self.states {
-            if let Some(id) = state.active
-                && (!state.wanted || state.desired != state.submitted)
-                && !state.canceling
-            {
-                match ids.cancel(submit, id) {
-                    Ok(()) => state.canceling = true,
-                    Err(UringError::SqRingFull) => return Ok(()),
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-        self.states
-            .retain(|state| state.wanted || state.active.is_some());
-        Ok(())
-    }
-
-    fn inflight_count(&self) -> usize {
-        self.states
-            .iter()
-            .filter(|state| state.active.is_some())
-            .count()
-    }
-
-    fn has_pending(&self) -> bool {
-        self.states
-            .iter()
-            .any(|state| state.wanted || state.active.is_some())
-    }
-
-    fn arm(&mut self, submit: &mut impl Submit, ids: &mut Identities) -> liburing::Result<()> {
-        for state in &mut self.states {
-            if !state.wanted || state.active.is_some() {
-                continue;
-            }
-            let mask = if state.desired.readable {
-                libc::POLLIN as u32
-            } else {
-                0
-            } | if state.desired.writable {
-                libc::POLLOUT as u32
-            } else {
-                0
-            };
-            let id = ids.next()?;
-            match submit.poll(id, Rc::clone(&state.socket), mask) {
-                Ok(()) => {
-                    state.active = Some(id);
-                    state.submitted = state.desired;
-                    state.canceling = false;
-                }
-                Err(UringError::SqRingFull) => return Ok(()),
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
-    }
-
-    fn complete(
-        &mut self,
-        completion: Completion,
-        resolver: &Resolver,
-    ) -> Option<(i32, bool, bool)> {
-        let state = self
-            .states
-            .iter_mut()
-            .find(|state| state.active == Some(completion.operation_id))?;
-        state.active = None;
-        state.canceling = false;
-        if !resolver.owns_socket(state.fd, state.generation) || completion.result < 0 {
-            return None;
-        }
-        let flags = completion.result;
-        let errors = i32::from(libc::POLLERR | libc::POLLHUP | libc::POLLNVAL);
-        Some((
-            state.fd,
-            flags & (i32::from(libc::POLLIN) | errors) != 0,
-            flags & (i32::from(libc::POLLOUT) | errors) != 0,
-        ))
     }
 }
 
