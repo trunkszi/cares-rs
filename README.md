@@ -102,7 +102,8 @@ The codec example is pure in-memory; the two resolver examples bind a determinis
 ## Shared-Ring Shutdown
 
 Call `driver.flush(&mut ring)` after submitting queries, then drive the shared
-ring with `ring.wait_completions(min, timeout, &mut dispatcher)`. Route the DNS
+ring with `ring.wait_completions(min, timeout, &mut dispatcher)` in `EventDriven`
+mode or `ring.tick(&mut dispatcher)` in `SqPoll` mode. Route the DNS
 subsystem to `driver.dispatch(completion, submissions)`; the driver remains
 owned by the caller throughout. Completion routing uses liburing `OperationId`
 and `OperationPayload`; the completed identity is `Completion::operation_id`.
