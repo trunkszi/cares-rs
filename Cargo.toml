@@ -19,8 +19,8 @@ thiserror = { version = "2" }
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = { version = "1" }
 proc-macro2 = { version = "1" }
-liburing = { version = "0.0.1", package = "liburing-proactor", default-features = false }
-liburing-macros = { version = "0.0.1", default-features = false }
+liburing = { git = "https://github.com/trunkszi/liburing-rs.git", branch = "main", package = "liburing-proactor", default-features = false }
+liburing-macros = { git = "https://github.com/trunkszi/liburing-rs.git", branch = "main", default-features = false }
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]

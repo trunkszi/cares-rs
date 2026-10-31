@@ -324,9 +324,18 @@ impl ProactorResolver {
                 ));
             }
             self.flush(proactor)?;
-            proactor
-                .wait_completions(1, Some(remaining.min(Duration::from_millis(20))), self)
-                .map_err(|error| AresError::invalid_input(format!("DNS shutdown wait: {error}")))?;
+            if proactor.mode().allows_blocking_wait() {
+                proactor
+                    .wait_completions(1, Some(remaining.min(Duration::from_millis(20))), self)
+                    .map_err(|error| {
+                        AresError::invalid_input(format!("DNS shutdown wait: {error}"))
+                    })?;
+            } else {
+                proactor.tick(self).map_err(|error| {
+                    AresError::invalid_input(format!("DNS shutdown tick: {error}"))
+                })?;
+                std::hint::spin_loop();
+            }
         }
         Ok(())
     }
